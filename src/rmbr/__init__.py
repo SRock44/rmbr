@@ -1,8 +1,24 @@
 """rmbr — embedded, local-first memory + retrieval for AI agents.
 
-v0.1 is in active development; this early release is not yet functional.
-Watch the repository for the first real release:
-https://github.com/SRock44/rmbr
+    from rmbr import Memory, Index, Policy
+
+    mem = Memory("agents.db", namespace="researcher")
+    mem.remember("user prefers dark mode and short answers")
+    mem.recall("user preferences")
+
+    idx = Index("agents.db")
+    idx.add_files("docs/")
+    idx.search("how do I deploy?", k=5)
+
+v0.1 is in active development. Watch the repository for the first
+tagged release: https://github.com/SRock44/rmbr
 """
 
+from .index import Index
+from .mcp_server import serve_mcp
+from .memory import Memory
+from .policy import Policy
+
 __version__ = "0.0.1"
+
+__all__ = ["Memory", "Index", "Policy", "serve_mcp"]
