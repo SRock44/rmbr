@@ -9,15 +9,28 @@ description = "Give your agent memory and knowledge. One file, three lines, no s
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 authors = [{ name = "rmbr contributors" }]
 keywords = ["agents", "memory", "rag", "retrieval", "embedded", "mcp", "llm"]
 classifiers = [
-    "Development Status :: 1 - Planning",
+    "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
+dependencies = [
+    "numpy",
+    "usearch>=2.9",
+    "fastembed>=0.3",
+    # mcp_server.py is written against the MCPServer API introduced in the
+    # mcp 2.x line (mcp.server.mcpserver) — mcp 1.x's FastMCP lived at a
+    # different import path, so this floor is a hard requirement, not just
+    # "newest available".
+    "mcp>=2.0,<3",
+]
+
+[project.optional-dependencies]
+bench = ["chromadb", "lancedb"]
 
 [project.urls]
 Homepage = "https://github.com/SRock44/rmbr"
@@ -25,3 +38,6 @@ Repository = "https://github.com/SRock44/rmbr"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/rmbr"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

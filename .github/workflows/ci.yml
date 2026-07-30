@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ["3.10", "3.13"]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # --only-binary :all: is the whole point of running this on all three
+      # OSes: rmbr promises "pip install rmbr, no build toolchain required".
+      # If any dependency lacks a wheel for some OS/Python combo, this
+      # fails loudly here instead of surprising a user on `pip install`.
+      - name: Install rmbr (wheels only)
+        run: python -m pip install --only-binary ":all:" -e . pytest
+
+      - name: Run tests
+        run: python -m pytest tests/ -v
+
+  # A single stable check name for branch protection to require, so it
+  # doesn't need updating every time the os/python-version matrix above
+  # changes shape.
+  ci-success:
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check matrix result
+        run: |
+          if [ "${{ needs.test.result }}" != "success" ]; then
+            echo "One or more matrix jobs failed."
+            exit 1
+          fi
