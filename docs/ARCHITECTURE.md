@@ -70,4 +70,4 @@ One `.db` file per index. Everything — documents, chunks, memories, caches, an
 
 ## Performance claims policy
 
-No performance number is published unless produced by `bench/run.py`: reproducible, recall pinned, vs Chroma and LanceDB on identical hardware. CI runs the test suite on ubuntu-latest, windows-latest, and macos-latest.
+No performance number is published unless produced by a script in `bench/`: reproducible, recall pinned, vs Chroma and LanceDB on identical hardware. Two scripts now, not one: `bench/latency.py` (single-call latency with the real default embedder — the headline number, since it matches how rmbr is actually used) and `bench/run.py` (bulk-ingest throughput/recall on precomputed vectors — disclosed but not led with; that's not the workload rmbr optimizes for). See README.md's Performance and Alternatives sections for the current published numbers and reasoning, and `bench/pinned/` for the raw output. CI runs the test suite on ubuntu-latest, windows-latest, and macos-latest.

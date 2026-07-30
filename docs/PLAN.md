@@ -20,7 +20,7 @@
 
 ## Claims policy
 
-No number appears in the README that isn't produced by `bench/run.py` — reproducible, recall pinned, vs named competitors (Chroma + LanceDB) on identical hardware. Until then: only externally citable benchmarks and countable facts.
+No number appears in the README that isn't produced by a script in `bench/` — reproducible, recall pinned, vs named competitors (Chroma + LanceDB) on identical hardware. Numbers are now published in README.md: single-call latency (`bench/latency.py`, real default embedder, the number that matches rmbr's actual usage pattern) is the headline; bulk-ingest throughput (`bench/run.py`, precomputed vectors, isolates engine performance) is disclosed but explicitly not led with, since it's not the workload rmbr is built for — see README.md's "Alternatives" and "Performance" sections. Raw output for every run, all seeds, is checked in at `bench/pinned/`.
 
 ## Architecture
 
@@ -64,7 +64,7 @@ rmbr/
 6. `mcp_server.py` + `__main__.py`
 7. CI (3-OS matrix) — added early to catch platform issues during development
 8. `bench/` — vs chromadb + lancedb (Linux server for publishable numbers)
-9. README final numbers (bench-produced only)
+9. README final numbers (bench-produced only) — done; also added `bench/latency.py` (single-call latency, real embedder), not in the original plan, added because bulk-ingest throughput turned out to be the wrong number to lead with (see README.md's Performance section)
 
 ## Verification
 
@@ -72,5 +72,5 @@ rmbr/
 - Integration: ingest → hybrid search returns expected hits; warm cached query shows ~0 embed time in timings
 - Memory: persistence across processes; namespace isolation; policy grant/deny paths
 - MCP smoke test: `python -m rmbr` driven by an MCP client script; verify namespace pinning
-- Bench: p50/p95 latency, ingestion throughput, recall@k vs Chroma + LanceDB
+- Bench: p50/p95 latency, ingestion throughput, recall@k vs Chroma + LanceDB — run for real on the pinned Ubuntu machine; caught and fixed two real bugs (a recall regression in `AnnIndex`'s default HNSW params, a per-row-commit performance bug in `store.py`) rather than just producing numbers
 - Clean-venv wheels-only install on Windows, enforced automatically by CI's `--only-binary :all:` step (this is how the hnswlib→usearch switch above got caught)
