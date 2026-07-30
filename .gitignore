@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Tooling
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# rmbr artifacts
+*.db
+*.db-wal
+*.db-shm
+
+# Bench outputs
+bench/results/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
