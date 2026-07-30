@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "rmbr"
+version = "0.0.1"
+description = "Give your agent memory and knowledge. One file, three lines, no server, no API key. v0.1 in active development."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.9"
+authors = [{ name = "rmbr contributors" }]
+keywords = ["agents", "memory", "rag", "retrieval", "embedded", "mcp", "llm"]
+classifiers = [
+    "Development Status :: 1 - Planning",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+[project.urls]
+Homepage = "https://github.com/SRock44/rmbr"
+Repository = "https://github.com/SRock44/rmbr"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/rmbr"]
