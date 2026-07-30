@@ -1,14 +1,17 @@
 """Text splitters for turning documents into search-sized chunks.
 
-Two entry points: ``split_text`` for plain text, ``split_markdown`` for
+Three entry points: ``split_text`` for plain text, ``split_markdown`` for
 markdown (splits on headers first so a chunk never silently straddles two
-unrelated sections). Both return a plain list of strings — chunking has no
-opinion on storage or embeddings, it just cuts text into pieces of a
-reasonable size.
+unrelated sections), ``split_python`` for Python source (splits on
+top-level function/class boundaries using the standard library's ``ast``
+module, so a chunk never cuts a function in half). All three return a
+plain list of strings — chunking has no opinion on storage or embeddings,
+it just cuts text into pieces of a reasonable size.
 """
 
 from __future__ import annotations
 
+import ast
 import re
 
 DEFAULT_CHUNK_SIZE = 800
@@ -58,6 +61,68 @@ def split_markdown(
     chunks = []
     for breadcrumb, section in _split_by_headers(text):
         for piece in split_text(section, chunk_size, chunk_overlap):
+            chunks.append(f"{breadcrumb}\n{piece}" if breadcrumb else piece)
+    return chunks
+
+
+def split_python(
+    text: str,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+    chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
+) -> list[str]:
+    """Split Python source on top-level function/class boundaries.
+
+    Parses with the standard library's ``ast`` module — no parser
+    dependency. Each function or class becomes its own chunk (further
+    split by ``split_text`` only if it alone exceeds ``chunk_size``),
+    prefixed with a breadcrumb (``"# def handler"`` / ``"# class
+    Server"``) so a chunk retrieved on its own still says what it's part
+    of. Decorators and any comments immediately above a definition are
+    kept attached to it, not silently dropped or split off — everything
+    between one definition and the next (imports, module docstring,
+    stray comments) rides along with whichever definition follows it.
+
+    Falls back to ``split_text`` on unparseable input (a syntax error, or
+    text that just isn't Python) rather than raising — chunking should
+    never be the thing that breaks ingestion.
+    """
+    text = text.strip()
+    if not text:
+        return []
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return split_text(text, chunk_size, chunk_overlap)
+    if not tree.body:
+        return split_text(text, chunk_size, chunk_overlap)
+
+    lines = text.splitlines()
+    segments: list[tuple[str, str]] = []
+    pending_start = 0
+
+    def flush(end_line: int, breadcrumb: str) -> None:
+        nonlocal pending_start
+        source = "\n".join(lines[pending_start:end_line]).strip()
+        if source:
+            segments.append((breadcrumb, source))
+        pending_start = end_line
+
+    for node in tree.body:
+        node_end = getattr(node, "end_lineno", None) or node.lineno
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            flush(node_end, f"# def {node.name}")
+        elif isinstance(node, ast.ClassDef):
+            flush(node_end, f"# class {node.name}")
+        # Anything else (imports, module docstring, top-level assignments)
+        # just accumulates unflushed until the next def/class carries it
+        # along, or the final flush below picks up whatever's left.
+
+    if pending_start < len(lines):
+        flush(len(lines), "")
+
+    chunks = []
+    for breadcrumb, source in segments:
+        for piece in split_text(source, chunk_size, chunk_overlap):
             chunks.append(f"{breadcrumb}\n{piece}" if breadcrumb else piece)
     return chunks
 

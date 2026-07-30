@@ -1,4 +1,4 @@
-from rmbr.chunk import split_markdown, split_text
+from rmbr.chunk import split_markdown, split_python, split_text
 
 
 def test_split_text_short_text_is_one_chunk():
@@ -55,3 +55,64 @@ def test_split_markdown_preamble_before_first_header_kept():
     text = "intro line\n\n# Section\n\nbody text"
     chunks = split_markdown(text, chunk_size=800)
     assert any("intro line" in c for c in chunks)
+
+
+def test_split_python_separates_top_level_functions():
+    text = "def foo():\n    return 1\n\n\ndef bar():\n    return 2\n"
+    chunks = split_python(text, chunk_size=800)
+    assert any("# def foo" in c and "return 1" in c for c in chunks)
+    assert any("# def bar" in c and "return 2" in c for c in chunks)
+    # each function is its own chunk, not merged together
+    assert not any("return 1" in c and "return 2" in c for c in chunks)
+
+
+def test_split_python_keeps_class_and_its_methods_together():
+    text = "class Server:\n    def start(self):\n        pass\n\n    def stop(self):\n        pass\n"
+    chunks = split_python(text, chunk_size=800)
+    assert any("# class Server" in c and "def start" in c and "def stop" in c for c in chunks)
+
+
+def test_split_python_keeps_decorator_attached_to_function():
+    text = "@app.route('/health')\ndef health():\n    return 'ok'\n"
+    chunks = split_python(text, chunk_size=800)
+    assert any("@app.route" in c and "def health" in c for c in chunks)
+
+
+def test_split_python_keeps_comment_above_function_attached():
+    text = "# explains what bar does\ndef bar():\n    pass\n"
+    chunks = split_python(text, chunk_size=800)
+    assert any("explains what bar does" in c and "def bar" in c for c in chunks)
+
+
+def test_split_python_no_content_silently_dropped():
+    text = (
+        '"""Module docstring."""\n'
+        "import os\n\n"
+        "def foo():\n    return os.getcwd()\n\n"
+        "TRAILING = 1\n"
+    )
+    chunks = split_python(text, chunk_size=800)
+    combined = "\n".join(chunks)
+    assert "Module docstring" in combined
+    assert "import os" in combined
+    assert "def foo" in combined
+    assert "TRAILING = 1" in combined
+
+
+def test_split_python_falls_back_to_split_text_on_syntax_error():
+    text = "this is not valid python syntax :::: def ("
+    chunks = split_python(text, chunk_size=800)
+    assert chunks == split_text(text, chunk_size=800)
+
+
+def test_split_python_falls_back_on_empty_input():
+    assert split_python("") == []
+    assert split_python("   ") == []
+
+
+def test_split_python_splits_oversized_function_further():
+    body = "\n".join(f"    x{i} = {i}" for i in range(200))
+    text = f"def big():\n{body}\n"
+    chunks = split_python(text, chunk_size=200, chunk_overlap=20)
+    assert len(chunks) > 1
+    assert all(c.startswith("# def big") for c in chunks)
