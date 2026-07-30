@@ -8,21 +8,22 @@
 
 ## Why
 
-Every agent memory tool on the market assumes you'll run infrastructure for it: a Docker container, a graph database, a hosted API with a key. rmbr assumes the opposite — that memory should ship *inside* whatever you're already building, the same way SQLite ships inside a mobile app instead of requiring a database server. That difference in assumption is what makes these use cases possible:
+Agents can already "remember" things across restarts — a `CLAUDE.md`, a system prompt, a JSON file on disk. That's not new, and rmbr isn't claiming otherwise.
 
-- **A persistent identity across restarts.** A coding agent that works on your repo over weeks, across dozens of separate sessions, remembers your conventions, past decisions, and what's already failed — not because you re-explain it every time, but because its memory is a file that survives the process exiting.
-- **Coordination for a team of agents that don't fully trust each other.** `Policy` gives a supervisor and its specialist agents each their own private memory *and* a shared knowledge base, with cross-namespace access explicitly granted rather than accidental — the substrate for a real multi-agent system, not a single shared vector index everyone can read and write.
-- **A memory feature you can ship inside a product**, not bolt onto infrastructure. A desktop app, a CLI tool, an offline-capable mobile backend — anywhere you can't assume a vector database and an API key are available, you can still assume a `.db` file is.
-- **A portable, versionable agent brain.** Because it's one file: `git commit` it, diff it, branch it to try something risky, roll it back, attach the exact file to a bug report ("here's what the agent knew when this went wrong"), or check a known-good state into a test fixture for deterministic CI.
-- **Fully offline.** Edge devices, field deployments, air-gapped environments — nothing in the core memory/retrieval path needs a network call, ever, by default.
+What breaks is what happens as that file grows. Every fact in a static context file costs tokens on *every single call*, whether it's relevant to the current task or not — so it either stays small (a few dozen hand-curated notes) or turns into noise nobody's cheaply reading anymore. There's no ranking: the agent gets the whole file, or nothing, never just the 5 facts that actually matter for this turn. A static file gets more expensive and less useful the more the agent learns; a searchable memory gets more useful and stays the same cost per call. `mem.recall(query)` returns the *k* most relevant memories out of however many thousand you've accumulated — that's the actual gap between "an agent that can write to a file" and "an agent with memory."
+
+The other place people get burned: rolling this yourself. Chunk text, embed it, throw it in a vector store — that's a legitimately easy weekend project (this one started that way too). What's easy to get wrong in that weekend project: real hybrid search (most ship vector-only or keyword-only and never notice), an embedding cache (so you're not re-embedding — and re-paying for — the same text on every call), and, if there's more than one agent involved, *safe* isolation between them. Most hand-rolled or framework-provided multi-agent memory either shares one blob every agent can read and write, or scopes access via a `namespace`/`user_id` parameter the *calling model itself* supplies — which a prompt injection can simply ask to change. rmbr's MCP tools don't expose that parameter at all; there's no field for an injected instruction to fill in.
+
+So: rmbr exists for the gap between "stuff it in a system prompt" (doesn't scale past a few KB) and "stand up real infrastructure" (Docker, a graph database, a hosted API key) — search-quality, safely-isolated memory, as a dependency, not a service.
 
 Concretely, rmbr gives you:
 
-- **One file.** Your agent's entire memory and knowledge base is a single `.db` file.
+- **One file.** Your agent's entire memory and knowledge base is a single `.db` file — `git commit` it, diff it, roll it back, hand it to a teammate, attach it to a bug report, or check a known-good state into a test fixture for deterministic CI. No hosted memory service lets you do any of that.
 - **Three lines.** `pip install rmbr`, import, remember. No account, no config, no service.
-- **No server.** Runs inside your process, like SQLite.
+- **No server, works offline.** Runs inside your process, like SQLite — no network call anywhere in the core memory/retrieval path, by default.
 - **No API key.** Embeddings run locally via a small ONNX model by default. Nothing phones home, ever. Cloud embedding providers (OpenAI/Voyage/Cohere) are strictly opt-in.
 - **Works with every LLM.** rmbr never calls an LLM — it returns relevant text, you feed it to Claude, GPT, Gemini, or a local model. Zero model lock-in by construction.
+- **Namespace-pinned multi-agent access.** `Policy` is deny-by-default; MCP tools expose no namespace parameter to override — safe by construction, not by convention.
 
 ## API (v0.1)
 
