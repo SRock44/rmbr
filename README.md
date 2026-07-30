@@ -256,9 +256,29 @@ Read that last row carefully: **~85-90% of a search call's cost is the embedding
 
 **Bulk-ingest throughput, for full transparency (not a claim we're leading with):** rmbr batches every write in `add_texts()`/`add_files()` into one SQLite transaction, one embedder call, and one ANN-index insert for the whole batch, rather than once per document — a real, measured improvement from 950 to ~3,000 docs/s on a 5,000-doc synthetic corpus. Note what didn't move much: batching the embed call barely helped *in this specific benchmark*, because it feeds every engine identical precomputed vectors (a near-free dict lookup) specifically to isolate storage/ANN performance — a real embedder (ONNX inference, or an API call) has real fixed per-call overhead that batching actually amortizes, so `bench/latency.py`'s numbers above are the more representative ones for real-world embedding cost. Even after this, rmbr is still slower at pure bulk loading than both purpose-built alternatives: Chroma ingests ~2.6x faster (~7,850 docs/s) and LanceDB ~20-55x faster (~65,000-165,000 docs/s, wide variance across runs), because that's a fundamentally different job (one Arrow batch write, zero per-row relational bookkeeping, in LanceDB's case) than what rmbr is built for. What rmbr does hold its own on: recall@5 (0.95) is competitive with LanceDB's exact search (1.0) and ahead of Chroma's (0.80). Full numbers, all 3 seeds, in [`bench/pinned/`](bench/pinned/) and reproducible via `pip install -e ".[bench]" && python bench/run.py`. We're disclosing this, not hiding it: if bulk document loading at scale is your actual workload, see [Alternatives](#alternatives) above — that's not what rmbr optimizes for.
 
+### Why `bge-small-en-v1.5` is still the default
+
+We tested. `bench/quality.py` measures recall@1 on 150 hand-written (query, correct passage, distractors) examples — 50 each spanning remembered preferences, documentation, and code, the actual shapes of content rmbr indexes — against every same-size-class local embedding model `fastembed` supports, plus `bge-base-en-v1.5` as a "what does 3x the size buy you" reference point:
+
+| model | size | overall recall@1 |
+|---|---:|---:|
+| **bge-small-en-v1.5 (default)** | 67MB | 0.760 |
+| snowflake-arctic-embed-xs/s | 90-130MB | 0.647-0.673 |
+| all-MiniLM-L6-v2 / jina-v2-small | 90-120MB | 0.767 |
+| bge-base-en-v1.5 (3x the size) | 210MB | 0.833 |
+
+Nothing in bge-small's own size class beats it with any real confidence — the alternatives above land within about a point of it, which is noise at this sample size. The only model that wins by a real margin is `bge-base-en-v1.5`: +7.3 points recall@1, at a real, measured cost — 3x the download (210MB) and ~3.9x the per-embed latency (7.5ms vs 1.9ms p50, both still small in absolute terms). We tested that tradeoff and kept the smaller, faster model as the default; if you want the quality bump and don't mind the size, it's a one-line change:
+
+```python
+from rmbr.embed import FastEmbedEmbedder
+mem = Memory("agents.db", namespace="assistant", embedder=FastEmbedEmbedder(model_name="BAAI/bge-base-en-v1.5"))
+```
+
+Full data and every candidate's per-category breakdown: `python bench/quality.py --models candidates`.
+
 ## Roadmap
 
-- **v0.1 (done in this repo, not yet released to PyPI)** — `Memory` + `Policy` + `Index` (hybrid BM25 + vector search, metadata filtering), embedding + semantic query caches, MCP support (namespace-pinned), 3-OS CI (Linux/Windows/macOS), true batch ingestion with per-stage timings, async API surface (`a`-prefixed methods), a Python-aware chunker (stdlib `ast`, no added dependency), one hosted embedding provider (OpenAI), real single-call and bulk benchmark numbers, PyPI trusted publishing
+- **v0.1 (done in this repo, not yet released to PyPI)** — `Memory` + `Policy` + `Index` (hybrid BM25 + vector search, metadata filtering), embedding + semantic query caches, MCP support (namespace-pinned), 3-OS CI (Linux/Windows/macOS), true batch ingestion with per-stage timings, async API surface (`a`-prefixed methods), a Python-aware chunker (stdlib `ast`, no added dependency), one hosted embedding provider (OpenAI), a 150-example quality eval that confirmed the default embedder against local alternatives, real single-call and bulk benchmark numbers, PyPI trusted publishing
 - **Known gaps** — Voyage/Cohere embedding providers (same `Embedder` protocol as `OpenAIEmbedder`, not yet written), more auto-detected chunkers (currently text/markdown/python)
 - **Next** — cut the v0.1.0 release
 
