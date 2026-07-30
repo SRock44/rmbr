@@ -74,17 +74,18 @@ class Index:
         `metadata` is attached to every chunk this document splits into,
         and is what `search(where=...)` filters against.
         """
-        document_id = self._ingest_one(
-            text,
-            source=source,
-            namespace=namespace,
-            metadata=metadata,
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-            markdown=markdown,
-        )
-        save_ann_index(self._store, _COLLECTION, self._ann)
-        self._store.clear_query_cache()
+        with self._store.transaction():
+            document_id = self._ingest_one(
+                text,
+                source=source,
+                namespace=namespace,
+                metadata=metadata,
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+                markdown=markdown,
+            )
+            save_ann_index(self._store, _COLLECTION, self._ann)
+            self._store.clear_query_cache()
         return document_id
 
     def add_texts(
@@ -101,26 +102,30 @@ class Index:
         """Index multiple standalone texts in one call. Returns their document ids.
 
         Prefer this over calling `add_text()` in a loop for anything more
-        than a handful of documents: the vector index is only persisted
-        once at the end here, instead of once per document, which is the
-        difference between O(n) and O(n^2) work as your corpus grows.
+        than a handful of documents: everything below - every chunk/embed
+        insert plus the final vector index save - lands in one SQLite
+        transaction instead of committing per document. Measured on real
+        hardware: that's a ~47x difference in ingest throughput (SQLite's
+        per-transaction fsync overhead dominates at one-commit-per-row,
+        not SQLite's actual throughput). See bench/ and README.md.
         """
         sources = sources or [None] * len(texts)
-        document_ids = [
-            self._ingest_one(
-                text,
-                source=source,
-                namespace=namespace,
-                metadata=metadata,
-                chunk_size=chunk_size,
-                chunk_overlap=chunk_overlap,
-                markdown=markdown,
-            )
-            for text, source in zip(texts, sources)
-        ]
-        if document_ids:
-            save_ann_index(self._store, _COLLECTION, self._ann)
-            self._store.clear_query_cache()
+        with self._store.transaction():
+            document_ids = [
+                self._ingest_one(
+                    text,
+                    source=source,
+                    namespace=namespace,
+                    metadata=metadata,
+                    chunk_size=chunk_size,
+                    chunk_overlap=chunk_overlap,
+                    markdown=markdown,
+                )
+                for text, source in zip(texts, sources)
+            ]
+            if document_ids:
+                save_ann_index(self._store, _COLLECTION, self._ann)
+                self._store.clear_query_cache()
         return document_ids
 
     def add_files(
@@ -142,24 +147,25 @@ class Index:
         didn't mean to index.
         """
         document_ids = []
-        for file_path in _iter_text_files(Path(path), pattern):
-            text = file_path.read_text(encoding=encoding, errors="ignore")
-            if not text.strip():
-                continue
-            document_ids.append(
-                self._ingest_one(
-                    text,
-                    source=str(file_path),
-                    namespace=namespace,
-                    metadata=metadata,
-                    chunk_size=chunk_size,
-                    chunk_overlap=chunk_overlap,
-                    markdown=file_path.suffix.lower() in _MARKDOWN_SUFFIXES,
+        with self._store.transaction():
+            for file_path in _iter_text_files(Path(path), pattern):
+                text = file_path.read_text(encoding=encoding, errors="ignore")
+                if not text.strip():
+                    continue
+                document_ids.append(
+                    self._ingest_one(
+                        text,
+                        source=str(file_path),
+                        namespace=namespace,
+                        metadata=metadata,
+                        chunk_size=chunk_size,
+                        chunk_overlap=chunk_overlap,
+                        markdown=file_path.suffix.lower() in _MARKDOWN_SUFFIXES,
+                    )
                 )
-            )
-        if document_ids:
-            save_ann_index(self._store, _COLLECTION, self._ann)
-            self._store.clear_query_cache()
+            if document_ids:
+                save_ann_index(self._store, _COLLECTION, self._ann)
+                self._store.clear_query_cache()
         return document_ids
 
     def _ingest_one(
@@ -247,11 +253,12 @@ class Index:
                 f"{self.namespace!r} is not allowed to delete from namespace {document.namespace!r}"
             )
         chunk_ids = self._store.get_chunk_ids_for_document(document_id)
-        self._store.delete_document(document_id)
-        if self._ann is not None and chunk_ids:
-            self._ann.remove(chunk_ids)
-            save_ann_index(self._store, _COLLECTION, self._ann)
-        self._store.clear_query_cache()
+        with self._store.transaction():
+            self._store.delete_document(document_id)
+            if self._ann is not None and chunk_ids:
+                self._ann.remove(chunk_ids)
+                save_ann_index(self._store, _COLLECTION, self._ann)
+            self._store.clear_query_cache()
 
     def close(self) -> None:
         self._store.close()

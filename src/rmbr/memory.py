@@ -60,14 +60,15 @@ class Memory:
     ) -> int:
         """Save a memory. Returns its id (pass it to `forget()` later if needed)."""
         target_namespace = resolve_writable_namespace(self.policy, self.namespace, namespace)
-        memory_id = self._store.insert_memory(target_namespace, text, metadata)
+        with self._store.transaction():
+            memory_id = self._store.insert_memory(target_namespace, text, metadata)
 
-        vector = self._embedder.embed_one(text)
-        if self._ann is None:
-            self._ann = AnnIndex(dim=len(vector))
-        self._ann.add([memory_id], [vector])
-        save_ann_index(self._store, _COLLECTION, self._ann)
-        self._store.clear_query_cache()
+            vector = self._embedder.embed_one(text)
+            if self._ann is None:
+                self._ann = AnnIndex(dim=len(vector))
+            self._ann.add([memory_id], [vector])
+            save_ann_index(self._store, _COLLECTION, self._ann)
+            self._store.clear_query_cache()
 
         return memory_id
 
@@ -126,11 +127,12 @@ class Memory:
             raise PermissionError(
                 f"{self.namespace!r} is not allowed to delete from namespace {record.namespace!r}"
             )
-        self._store.delete_memory(memory_id)
-        if self._ann is not None:
-            self._ann.remove([memory_id])
-            save_ann_index(self._store, _COLLECTION, self._ann)
-        self._store.clear_query_cache()
+        with self._store.transaction():
+            self._store.delete_memory(memory_id)
+            if self._ann is not None:
+                self._ann.remove([memory_id])
+                save_ann_index(self._store, _COLLECTION, self._ann)
+            self._store.clear_query_cache()
 
     def list(self, *, limit: int | None = None) -> list[MemoryRecord]:
         """List this namespace's memories, most recent first."""
