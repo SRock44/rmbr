@@ -8,40 +8,133 @@
 
 ## Why
 
-Agents need two things constantly: **memory** (remember things across sessions) and **retrieval** (look up relevant knowledge mid-task). Today that means signing up for a hosted memory service or assembling a vector database + embedding API + framework glue. rmbr is the embedded alternative:
+Agents can already "remember" things across restarts — a `CLAUDE.md`, a system prompt, a JSON file on disk. That's not new, and rmbr isn't claiming otherwise.
 
-- **One file.** Your agent's entire memory and knowledge base is a single `.db` file. Commit it to git, ship it in an installer, `scp` it to a server, hand it to a teammate.
+What breaks is what happens as that file grows. Every fact in a static context file costs tokens on *every single call*, whether it's relevant to the current task or not — so it either stays small (a few dozen hand-curated notes) or turns into noise nobody's cheaply reading anymore. There's no ranking: the agent gets the whole file, or nothing, never just the 5 facts that actually matter for this turn. A static file gets more expensive and less useful the more the agent learns; a searchable memory gets more useful and stays the same cost per call. `mem.recall(query)` returns the *k* most relevant memories out of however many thousand you've accumulated — that's the actual gap between "an agent that can write to a file" and "an agent with memory."
+
+The other place people get burned: rolling this yourself. Chunk text, embed it, throw it in a vector store — that's a legitimately easy weekend project (this one started that way too). What's easy to get wrong in that weekend project: real hybrid search (most ship vector-only or keyword-only and never notice), an embedding cache (so you're not re-embedding — and re-paying for — the same text on every call), and, if there's more than one agent involved, *safe* isolation between them. Most hand-rolled or framework-provided multi-agent memory either shares one blob every agent can read and write, or scopes access via a `namespace`/`user_id` parameter the *calling model itself* supplies — which a prompt injection can simply ask to change. rmbr's MCP tools don't expose that parameter at all; there's no field for an injected instruction to fill in.
+
+So: rmbr exists for the gap between "stuff it in a system prompt" (doesn't scale past a few KB) and "stand up real infrastructure" (Docker, a graph database, a hosted API key) — search-quality, safely-isolated memory, as a dependency, not a service.
+
+Concretely, rmbr gives you:
+
+- **One file.** Your agent's entire memory and knowledge base is a single `.db` file — `git commit` it, diff it, roll it back, hand it to a teammate, attach it to a bug report, or check a known-good state into a test fixture for deterministic CI. No hosted memory service lets you do any of that.
 - **Three lines.** `pip install rmbr`, import, remember. No account, no config, no service.
-- **No server.** Runs inside your process, like SQLite.
-- **No API key.** Embeddings run locally via a small ONNX model by default. Nothing phones home, ever. Cloud embedding providers (OpenAI/Voyage/Cohere) are strictly opt-in.
-- **Works with every LLM.** rmbr never calls an LLM — it returns relevant text, you feed it to Claude, GPT, Gemini, or a local model. Zero model lock-in by construction.
+- **No added infrastructure.** Your agent already needs a network connection and an API key for its LLM calls — rmbr doesn't add a *second* one just for memory. mem0 defaults to a hosted LLM+embedding API, Zep needs Docker+Neo4j+an LLM key, Letta needs a server+Postgres — all on top of whatever you're already paying for the model itself. rmbr's own memory/retrieval path makes zero network calls by default: one less vendor, one less key to leak, one less service whose outage takes your agent's memory down with it. (It also means rmbr keeps working with a fully local LLM — Ollama, llama.cpp — for genuinely offline or air-gapped use; most people won't need that, but it's there.)
+- **No proprietary format.** rmbr never calls an LLM itself — `recall()`/`search()` return plain strings, floats, and dicts (`hit.text`, `hit.score`, `hit.metadata`). Nothing to parse, no vendor SDK required to consume it — see [Using results with an LLM](#using-results-with-an-llm) below for how that plugs into Claude, GPT, or Gemini identically.
+- **Namespace-pinned multi-agent access.** `Policy` is deny-by-default; MCP tools expose no namespace parameter to override — safe by construction, not by convention.
 
-## API (v0.1)
+## Quickstart
 
 ```python
-from rmbr import Memory, Index, Policy, serve_mcp
+from rmbr import Memory
 
-# Agent memory — the headline
-mem = Memory("agents.db", namespace="researcher")
+mem = Memory("agents.db", namespace="assistant")
 mem.remember("user prefers dark mode and short answers")
-mem.recall("user preferences")                      # relevant memories, fast
+mem.recall("user preferences")
+```
 
-# Multi-agent access control — deny-by-default
-policy = Policy()
-policy.allow("supervisor", read="*")                # supervisor sees all lanes
-mem = Memory("agents.db", namespace="coder", policy=policy)
+Three lines — that's the whole API for the common case. Everything below is opt-in and lives in its own section, so you only read what you actually need. Library-only by design — no CLI to learn. (`python -m rmbr` exists solely so MCP clients can launch the server; see [MCP support](#mcp-support) below.)
 
-# Knowledge / RAG — same engine
+### Indexing documents (RAG)
+
+```python
+from rmbr import Index
+
+idx = Index("agents.db")
+idx.add_files("docs/")                     # .py, .md, and plain text each get an appropriate splitter automatically
+hits = idx.search("how do I deploy?", k=5)
+hits[0].text, hits[0].score, hits.timings  # per-stage latency, always visible
+```
+
+`Index` and `Memory` share the same `.db` file — open both against the same path if your agent needs a knowledge base *and* a memory. `add_files()`/`add_texts()` return an `IngestResult`: a plain list of document ids with a `.timings` breakdown attached (`chunk_ms`/`embed_ms`/`store_ms`/`ann_ms`/`docs_per_second`) — the same transparency `hits.timings` gives you for search, applied to ingestion, so you can see for yourself that embedding dominates the cost rather than take our word for it.
+
+### Using results with an LLM
+
+rmbr never calls a model — `search()`/`recall()` hand you back plain text and a score, and you decide what to do with it. The standard pattern (classic RAG: retrieve, then inject the retrieved text into the prompt) with Claude:
+
+```python
+from anthropic import Anthropic
+from rmbr import Index
+
 idx = Index("agents.db")
 idx.add_files("docs/")
-hits = idx.search("how do I deploy?", k=5)          # hybrid BM25 + vector search
-hits[0].text, hits[0].score, hits.timings           # per-stage latency, always visible
 
-# Expose memory to external agents (Claude Code, Cursor, any MCP client)
+client = Anthropic()  # reads ANTHROPIC_API_KEY from the environment
+
+def answer(question: str) -> str:
+    hits = idx.search(question, k=5)
+    context = "\n\n".join(f"<document>{hit.text}</document>" for hit in hits)
+    response = client.messages.create(
+        model="claude-sonnet-5",
+        max_tokens=1024,
+        # Context before the question, not after — Anthropic's own prompting
+        # docs measure this ordering as meaningfully better for long-context
+        # RAG, though it isn't required for correctness.
+        messages=[{"role": "user", "content": f"{context}\n\nUsing the documents above, answer: {question}"}],
+    )
+    return response.content[0].text
+
+answer("how do I deploy?")
+```
+
+This isn't Claude-specific. `hit.text` is a plain Python string with no wrapper, no provider object, nothing rmbr-proprietary — the exact same `context` string above drops verbatim into OpenAI's `messages` array (`client.chat.completions.create(model=..., messages=[...])`) or Gemini's `contents`. Every mainstream chat-completion API takes the same fundamental shape (a list of role-tagged text messages), which is why "retrieve text, put it in the prompt" — the only integration contract rmbr makes — works identically across providers. Swap the SDK call, nothing else changes.
+
+Want the embedding itself to come from OpenAI instead of the local default? `Memory("agents.db", namespace="assistant", embedder=OpenAIEmbedder())` (`pip install rmbr[openai]`) — same `Embedder` protocol, same rest of the API.
+
+### Restricting access between agents
+
+```python
+from rmbr import Memory, Policy
+
+policy = Policy()
+policy.allow("supervisor", read="*")  # supervisor can read every namespace
+
+mem = Memory("agents.db", namespace="coder", policy=policy)
+```
+
+Deny-by-default: `coder` can only read/write its own namespace unless explicitly granted. See [Multi-agent isolation](#multi-agent-isolation-honestly-stated) below for the full model, the security reasoning, and a diagram of a real team topology.
+
+### Async, for web backends and concurrent agents
+
+Every read and write has an `a`-prefixed async twin — `aremember`/`arecall`/`aforget` on `Memory`, `aadd_text`/`aadd_texts`/`aadd_files`/`asearch` on `Index` — for `async def` route handlers (FastAPI, Starlette, aiohttp) where a blocking call stalls every other request on the same event loop:
+
+```python
+from fastapi import FastAPI
+from rmbr import Memory
+
+app = FastAPI()
+mem = Memory("agents.db", namespace="assistant")
+
+@app.post("/chat")
+async def chat(message: str):
+    context = await mem.arecall(message, k=5)
+    await mem.aremember(f"user said: {message}")
+    return {"context": [hit.text for hit in context]}
+```
+
+Or fan a supervisor out across several granted namespaces concurrently instead of one at a time:
+
+```python
+import asyncio
+
+coder_notes, researcher_notes = await asyncio.gather(
+    supervisor.arecall("release blockers", namespaces="coder"),
+    supervisor.arecall("release blockers", namespaces="researcher"),
+)
+```
+
+One honestly-stated limitation: async calls on the *same* `Memory`/`Index` instance are serialized behind an internal lock, reads included. That's deliberate — the vector index (`usearch`) isn't documented as safe for concurrent mutation from multiple threads, and a corrupted index is a far worse failure than giving up some read concurrency. Open separate instances against the same file for true parallelism; SQLite's WAL mode supports that fine.
+
+### Serving memory over MCP
+
+```python
+from rmbr import serve_mcp
+
 serve_mcp("agents.db", namespace="coder", read_only=True)
 ```
 
-Library-only by design — no CLI to learn. (`python -m rmbr` exists solely so MCP clients can launch the server.)
+See [MCP support](#mcp-support) below for what this exposes and how to actually connect a client to it.
 
 ### Try it from source
 
@@ -52,7 +145,7 @@ git clone https://github.com/SRock44/rmbr.git
 cd rmbr
 python -m venv .venv && source .venv/bin/activate   # .venv\Scripts\activate on Windows
 pip install --only-binary :all: -e .
-pytest tests/    # 93 tests, no network or API key required
+pytest tests/    # 129 tests, no network or API key required
 ```
 
 The default embedder (`fastembed`, a local ONNX model) downloads its model weights on first use. Every test in `tests/` instead uses `rmbr.embed.FakeEmbedder` — a deterministic, dependency-free embedder — so the suite runs fully offline; you can inject the same `FakeEmbedder` into your own tests via `Memory(..., embedder=FakeEmbedder())` / `Index(..., embedder=FakeEmbedder())`.
@@ -61,19 +154,133 @@ The default embedder (`fastembed`, a local ONNX model) downloads its model weigh
 
 - **Namespaces** keep agents' memories separate and are enforced on every call — but they are *organizational*, not cryptographic. Any code with access to the file can open the file. That's true of every embedded database; we say it out loud.
 - **Hard isolation** = separate `.db` files per trust boundary, plus OS file permissions.
-- **MCP serving is namespace-pinned:** the exposed tools have no namespace parameter, so an external agent structurally cannot query outside its lane.
+- **MCP serving is namespace-pinned:** the exposed tools have no namespace parameter, so an external agent structurally cannot query outside its lane — unlike every other MCP memory server we looked at, where the scope is a parameter the calling model supplies (and could be talked into changing).
 
-## Performance claims policy
+A concrete team topology — one supervisor with a broad grant, two specialists that can't see each other, one external MCP client pinned to a single lane, all in the same `agents.db` file:
 
-**This README will never contain a performance number that isn't produced by `bench/run.py`** — reproducible by anyone, recall pinned, against named competitors (Chroma, LanceDB) on identical hardware. The harness exists (`bench/`) and runs end-to-end today, but a number from a laptop is directional, not a claim — publishable numbers come from a run on the project's pinned Linux benchmark machine, not yet done. Until then: no speed claims, only design commitments — local embeddings (no network round trip), a content-hash embedding cache (never embed the same text twice), a semantic query cache, and in-RAM HNSW-family vector search (`usearch`).
+```mermaid
+flowchart TB
+    subgraph db["agents.db — one SQLite file"]
+        direction LR
+        supNS[("supervisor<br/>namespace")]
+        coderNS[("coder<br/>namespace")]
+        researchNS[("researcher<br/>namespace")]
+    end
 
-Want to run it yourself? `pip install -e ".[bench]" && python bench/run.py` — every engine is fed identical precomputed vectors so the comparison is apples-to-apples (see `bench/run.py`'s module docstring for the full methodology).
+    supervisor["Supervisor agent<br/>policy.allow('supervisor', read='*')"] ==>|read + write| supNS
+    supervisor -.->|read, explicitly granted| coderNS
+    supervisor -.->|read, explicitly granted| researchNS
+
+    coder["Coder agent<br/>Memory(path, namespace='coder')"] ==>|read + write| coderNS
+    researcher["Researcher agent<br/>Memory(path, namespace='researcher')"] ==>|read + write| researchNS
+
+    external["External MCP client<br/>(Claude Code, Cursor, ...)"] -->|"serve_mcp(path, namespace='coder')"| coderNS
+```
+
+The coder and researcher namespaces have no path between them on this diagram — that's the point, not an omission. Nothing needed to be configured to deny that access; only the supervisor's grant (`read="*"`) is explicit. The external MCP client's tool schema has no `namespace` argument at all, so it structurally cannot ask for anything outside `coder`, no matter what a document it's summarizing tells it to try.
+
+## MCP support
+
+[MCP](https://modelcontextprotocol.io) (Model Context Protocol) is an open, model-agnostic protocol for connecting AI applications — Claude Desktop, Claude Code, Cursor, and a growing list of others — to external tools and data sources through one standard interface, instead of every app inventing its own plugin format. rmbr speaks MCP so any MCP-capable client can search and remember through your `.db` file directly, without you writing a server yourself.
+
+### What `serve_mcp()` exposes
+
+```python
+from rmbr import serve_mcp
+
+serve_mcp("agents.db", namespace="coder")                  # read + write
+serve_mcp("agents.db", namespace="coder", read_only=True)  # read only
+```
+
+Three tools, all pinned to whatever namespace you pass at startup (see [Multi-agent isolation](#multi-agent-isolation-honestly-stated) above for why there's no namespace parameter for a client to override):
+
+- **`search(query, k=5)`** — hybrid search over documents added via `Index`
+- **`recall(query, k=5)`** — search over notes saved via `Memory`
+- **`remember(text)`** — save a new memory. Not present in the tool list at all — not just permission-denied — when `read_only=True`.
+
+### Connecting a client
+
+`serve_mcp()` blocks on stdio; it's meant to be launched as a subprocess by an MCP client, not called from inside your own long-running app. `python -m rmbr` is the launch shim for exactly that:
+
+```bash
+python -m rmbr agents.db --namespace coder --read-only
+```
+
+For Claude Desktop or Claude Code, add it to your MCP config (Claude Desktop's `claude_desktop_config.json`, or a project's `.mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "rmbr-coder": {
+      "command": "python",
+      "args": ["-m", "rmbr", "/absolute/path/to/agents.db", "--namespace", "coder", "--read-only"]
+    }
+  }
+}
+```
+
+Restart the client and its tool list picks up `search`/`recall` (and `remember`, unless read-only) scoped to that one namespace. The rest of the file — every other agent's memory — isn't reachable through this connection; there's no parameter that would let it be.
+
+## Alternatives
+
+Not "competitors" — genuinely different tools for genuinely different jobs. Here's where each one actually fits, including where rmbr *isn't* the right choice.
+
+**If you're evaluating a memory service** (mem0, Zep/Graphiti, Letta): all three are excellent at LLM-mediated memory intelligence — extracting facts from conversation, resolving contradictions, consolidating duplicates. rmbr deliberately does none of that; it never calls an LLM, full stop. That's a real capability gap, not spin — but it's also why rmbr has no API key requirement, no extra LLM cost or latency on every `remember()`, and no risk of a consolidation model quietly rewriting what you actually said. You get the primitives (`remember`/`recall`/`forget`, namespace policy); you decide what, if anything, sits on top.
+
+| | mem0 | Zep / Graphiti | Letta | rmbr |
+|---|---|---|---|---|
+| Deployment | SDK, but calls a hosted LLM + embedding API by default | Docker + Neo4j/FalkorDB + an LLM API | A server (Docker) + Postgres | Embedded — one file, your process |
+| API key required out of the box | Yes (OpenAI) | Yes (LLM for graph extraction) | Yes (LLM) | No |
+| Decides what's worth remembering | An LLM (fact extraction) | An LLM (graph edges, contradiction resolution) | An LLM (self-editing memory blocks) | You do — deterministic, no LLM in the write path |
+| State is a portable file | No | No | No | Yes |
+
+(GitHub stars as of this writing, for scale: mem0 ~62k, Graphiti ~29k, Letta ~24k. This is a much larger, faster-moving category than rmbr is part of — worth knowing going in.)
+
+**If you're evaluating a vector database** (Chroma, LanceDB, pgvector, Pinecone, ...): these are real peers on "embedded, no API key" — Chroma and LanceDB in particular are just as zero-server as rmbr. The difference is what's built on top of the vector index: with a raw vector database you're still building the memory API, the namespace/access-control layer, the hybrid BM25+vector fusion, the embedding cache, and an MCP server yourself. rmbr ships all of that already assembled, specifically for the agent-memory shape of problem.
+
+Where they legitimately win: **raw bulk-ingestion throughput at large scale.** If you're indexing millions of documents for a dedicated search product, use a purpose-built vector database — that's their job, not rmbr's. rmbr is tuned for what an agent's own memory and knowledge base actually looks like (its own history, a knowledge base in the hundreds-to-low-thousands of chunks), where single-call latency, not bulk-loading speed, is what you actually pay for on every turn. See [Performance](#performance) below for the honest numbers on both.
+
+## Performance
+
+**This README will never contain a performance number that isn't produced by a script in `bench/`** — reproducible by anyone, on disclosed hardware, methodology included.
+
+The number that matters for rmbr's actual usage pattern — an agent calling `remember()`/`search()` one at a time mid-reasoning-loop, not bulk-loading a corpus — is **single-call latency with the real default embedder**, not bulk throughput. That's what's below, run on the project's pinned Ubuntu benchmark machine (Intel Core Ultra 9 285K, 4 cores isolated via `taskset -c 0-3`, Ubuntu 24.04.4 LTS, Python 3.12.3), median of 3 runs, 100 samples/run:
+
+| operation | p50 | p95 | p99 |
+|---|---:|---:|---:|
+| `mem.remember(text)` | 5.8 ms | 11.1 ms | 11.5 ms |
+| `idx.search(query, k=5)` against a 500-doc index | 3.2 ms | 4.1 ms | 4.2 ms |
+| — of which, query embedding alone | 2.8 ms | 3.1 ms | 3.3 ms |
+
+Read that last row carefully: **~85-90% of a search call's cost is the embedding model, not rmbr.** rmbr's own storage/retrieval overhead is sub-millisecond. And all of this is imperceptible next to the LLM call that will follow it in any real agent loop — which was rmbr's founding thesis about where RAG latency actually lives (see [docs/PLAN.md](docs/PLAN.md)). Reproduce: `python bench/latency.py`; raw output for all 3 runs is in [`bench/pinned/`](bench/pinned/).
+
+**Bulk-ingest throughput, for full transparency (not a claim we're leading with):** rmbr batches every write in `add_texts()`/`add_files()` into one SQLite transaction, one embedder call, and one ANN-index insert for the whole batch, rather than once per document — a real, measured improvement from 950 to ~3,000 docs/s on a 5,000-doc synthetic corpus. Note what didn't move much: batching the embed call barely helped *in this specific benchmark*, because it feeds every engine identical precomputed vectors (a near-free dict lookup) specifically to isolate storage/ANN performance — a real embedder (ONNX inference, or an API call) has real fixed per-call overhead that batching actually amortizes, so `bench/latency.py`'s numbers above are the more representative ones for real-world embedding cost. Even after this, rmbr is still slower at pure bulk loading than both purpose-built alternatives: Chroma ingests ~2.6x faster (~7,850 docs/s) and LanceDB ~20-55x faster (~65,000-165,000 docs/s, wide variance across runs), because that's a fundamentally different job (one Arrow batch write, zero per-row relational bookkeeping, in LanceDB's case) than what rmbr is built for. What rmbr does hold its own on: recall@5 (0.95) is competitive with LanceDB's exact search (1.0) and ahead of Chroma's (0.80). Full numbers, all 3 seeds, in [`bench/pinned/`](bench/pinned/) and reproducible via `pip install -e ".[bench]" && python bench/run.py`. We're disclosing this, not hiding it: if bulk document loading at scale is your actual workload, see [Alternatives](#alternatives) above — that's not what rmbr optimizes for.
+
+### Why `bge-small-en-v1.5` is still the default
+
+We tested. `bench/quality.py` measures recall@1 on 150 hand-written (query, correct passage, distractors) examples — 50 each spanning remembered preferences, documentation, and code, the actual shapes of content rmbr indexes — against every same-size-class local embedding model `fastembed` supports, plus `bge-base-en-v1.5` as a "what does 3x the size buy you" reference point:
+
+| model | size | overall recall@1 |
+|---|---:|---:|
+| **bge-small-en-v1.5 (default)** | 67MB | 0.760 |
+| snowflake-arctic-embed-xs/s | 90-130MB | 0.647-0.673 |
+| all-MiniLM-L6-v2 / jina-v2-small | 90-120MB | 0.767 |
+| bge-base-en-v1.5 (3x the size) | 210MB | 0.833 |
+
+Nothing in bge-small's own size class beats it with any real confidence — the alternatives above land within about a point of it, which is noise at this sample size. The only model that wins by a real margin is `bge-base-en-v1.5`: +7.3 points recall@1, at a real, measured cost — 3x the download (210MB) and ~3.9x the per-embed latency (7.5ms vs 1.9ms p50, both still small in absolute terms). We tested that tradeoff and kept the smaller, faster model as the default; if you want the quality bump and don't mind the size, it's a one-line change:
+
+```python
+from rmbr.embed import FastEmbedEmbedder
+mem = Memory("agents.db", namespace="assistant", embedder=FastEmbedEmbedder(model_name="BAAI/bge-base-en-v1.5"))
+```
+
+Full data and every candidate's per-category breakdown: `python bench/quality.py --models candidates`.
 
 ## Roadmap
 
-- **v0.1 (done in this repo, not yet released to PyPI)** — `Memory` + `Policy` + `Index` (hybrid BM25 + vector search), embedding + semantic query caches, MCP support (namespace-pinned), 3-OS CI (Linux/Windows/macOS), benchmark harness vs Chroma and LanceDB
-- **Before the v0.1.0 tag** — publish real benchmark numbers from the pinned Linux machine, set up PyPI trusted publishing
-- **Later** — async API surface, more chunkers, additional embedding providers
+- **v0.1 (done in this repo, not yet released to PyPI)** — `Memory` + `Policy` + `Index` (hybrid BM25 + vector search, metadata filtering), embedding + semantic query caches, MCP support (namespace-pinned), 3-OS CI (Linux/Windows/macOS), true batch ingestion with per-stage timings, async API surface (`a`-prefixed methods), a Python-aware chunker (stdlib `ast`, no added dependency), one hosted embedding provider (OpenAI), a 150-example quality eval that confirmed the default embedder against local alternatives, real single-call and bulk benchmark numbers, PyPI trusted publishing
+- **Known gaps** — Voyage/Cohere embedding providers (same `Embedder` protocol as `OpenAIEmbedder`, not yet written), more auto-detected chunkers (currently text/markdown/python)
+- **Next** — cut the v0.1.0 release
 
 ## License
 

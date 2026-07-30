@@ -1,11 +1,10 @@
 # Releasing rmbr
 
-## One-time setup (already partly done)
+## One-time setup (done)
 
 `.github/workflows/publish.yml` publishes to PyPI using [Trusted
 Publishing](https://docs.pypi.org/trusted-publishers/) (OIDC) — no API
-token lives in this repo. Two pieces are required before the first real
-release:
+token lives in this repo.
 
 1. **GitHub environment `pypi`** — created (`gh api -X PUT
    repos/SRock44/rmbr/environments/pypi`). The workflow's `publish` job
@@ -13,20 +12,10 @@ release:
    later in Settings → Environments → pypi if you want a manual approval
    gate before every publish.
 
-2. **PyPI trusted publisher — not yet done, requires the pypi.org UI:**
-   `rmbr` already exists on PyPI (the `0.0.1` stub), so this is the
-   *existing project* flow, not the "pending publisher for a new
-   project" flow:
-   - Log in at pypi.org → your projects → **rmbr** → Manage → **Publishing**
-   - Add a new publisher → GitHub
-     - Owner: `SRock44`
-     - Repository: `rmbr`
-     - Workflow name: `publish.yml`
-     - Environment name: `pypi`
-   - Save.
-
-   Nobody but a maintainer with PyPI access to the `rmbr` project can do
-   this step — it can't be done via API or by me.
+2. **PyPI trusted publisher — done**, registered on pypi.org for the
+   existing `rmbr` project (Manage → Publishing → GitHub publisher:
+   owner `SRock44`, repo `rmbr`, workflow `publish.yml`, environment
+   `pypi`). Nothing else to do here before cutting a release.
 
 ## Cutting a release
 
@@ -46,9 +35,16 @@ release:
 
 ## Before the v0.1.0 tag specifically
 
-Per the claims policy (README.md, docs/PLAN.md): don't add performance
-numbers to the README until `bench/run.py` has actually been run on the
-project's pinned Linux benchmark machine and produced them. The harness
-is built and validated locally, but nobody's run it on real target
-hardware yet. v0.1.0 can ship without those numbers (design commitments
-only, as README.md currently states) if that's preferred over waiting.
+Done: `bench/run.py` (bulk ingest/recall) and `bench/latency.py`
+(single-call latency, real embedder) have both been run on the pinned
+Ubuntu benchmark machine (3 runs each, 4 cores isolated via `taskset`),
+and README.md's Performance section reflects the real numbers, honestly
+scoped — single-call latency is the headline, bulk-ingest throughput is
+disclosed but not led with, since it's not what rmbr optimizes for. Raw
+output for every run is checked in at `bench/pinned/`. Two real bugs
+were caught and fixed by these runs: a recall regression in `AnnIndex`'s
+default HNSW parameters, and a per-row-commit performance bug in
+`store.py` (see `src/rmbr/ann.py`, `src/rmbr/store.py`, and README.md's
+Performance section). Re-run both scripts before any future release if
+`ann.py`, `search.py`, `store.py`, or `bench/corpus.py` change — the
+numbers are load-bearing, not decorative.

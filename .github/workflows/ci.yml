@@ -26,8 +26,13 @@ jobs:
       # OSes: rmbr promises "pip install rmbr, no build toolchain required".
       # If any dependency lacks a wheel for some OS/Python combo, this
       # fails loudly here instead of surprising a user on `pip install`.
+      #
+      # Installs the [openai] extra too, so OpenAIEmbedder's tests actually
+      # run here instead of silently skipping (they use
+      # pytest.importorskip("openai") for contributors who haven't
+      # installed the extra locally - CI should still exercise them).
       - name: Install rmbr (wheels only)
-        run: python -m pip install --only-binary ":all:" -e . pytest
+        run: python -m pip install --only-binary ":all:" -e ".[openai]" pytest
 
       - name: Run tests
         run: python -m pytest tests/ -v

@@ -126,3 +126,65 @@ def test_reopening_existing_file_preserves_data(tmp_path):
     hits = s2.search_chunks_fts("persisted", ["researcher"], limit=5)
     assert len(hits) == 1
     s2.close()
+
+
+def test_writes_outside_transaction_commit_immediately(store):
+    doc_id = store.insert_document("researcher")
+    # A second connection to the same file should see it right away -
+    # proof the write wasn't left sitting in an uncommitted transaction.
+    other = Store(store.path)
+    assert other.get_document(doc_id) is not None
+    other.close()
+
+
+def test_transaction_batches_multiple_writes_into_one_commit(tmp_path):
+    path = tmp_path / "batch.db"
+    store = Store(path)
+
+    with store.transaction():
+        doc_id = store.insert_document("researcher")
+        store.insert_chunks(doc_id, "researcher", ["a", "b", "c"])
+        store.insert_memory("researcher", "a memory")
+
+    reopened = Store(path)
+    assert reopened.get_document(doc_id) is not None
+    assert len(reopened.get_chunk_ids_for_document(doc_id)) == 3
+    assert len(reopened.list_memories("researcher")) == 1
+    store.close()
+    reopened.close()
+
+
+def test_transaction_rolls_back_entirely_on_exception(tmp_path):
+    path = tmp_path / "rollback.db"
+    store = Store(path)
+
+    with pytest.raises(RuntimeError):
+        with store.transaction():
+            store.insert_document("researcher")
+            store.insert_memory("researcher", "should not survive")
+            raise RuntimeError("simulated failure mid-batch")
+
+    # Nothing from the failed transaction should have reached disk -
+    # not even the insert_document call that happened before the raise.
+    reopened = Store(path)
+    assert reopened.list_memories("researcher") == []
+    assert reopened.conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0] == 0
+    store.close()
+    reopened.close()
+
+
+def test_nested_transaction_is_owned_by_the_outermost_call(store):
+    with store.transaction():
+        doc_id = store.insert_document("researcher")
+        with store.transaction():  # a nested call must not commit early
+            store.insert_memory("researcher", "nested write")
+        # still inside the outer transaction here - a fresh connection
+        # should NOT see this yet, since the outer block hasn't exited.
+        other = Store(store.path)
+        assert other.list_memories("researcher") == []
+        other.close()
+
+    other = Store(store.path)
+    assert len(other.list_memories("researcher")) == 1
+    assert other.get_document(doc_id) is not None
+    other.close()

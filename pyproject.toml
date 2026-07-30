@@ -31,6 +31,7 @@ dependencies = [
 
 [project.optional-dependencies]
 bench = ["chromadb", "lancedb"]
+openai = ["openai>=1.0"]
 
 [project.urls]
 Homepage = "https://github.com/SRock44/rmbr"

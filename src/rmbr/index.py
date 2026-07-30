@@ -16,8 +16,10 @@ writer at a time.
 
 from __future__ import annotations
 
+import asyncio
+import time
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from ._engine import (
     load_ann_index,
@@ -27,18 +29,50 @@ from ._engine import (
     save_ann_index,
 )
 from .ann import AnnIndex
-from .chunk import DEFAULT_CHUNK_OVERLAP, DEFAULT_CHUNK_SIZE, split_markdown, split_text
+from .chunk import DEFAULT_CHUNK_OVERLAP, DEFAULT_CHUNK_SIZE, split_markdown, split_python, split_text
 from .embed import Embedder
 from .policy import Policy
 from .search import Hits, hybrid_search
 from .store import Store
 
 _COLLECTION = "chunks"
-_MARKDOWN_SUFFIXES = {".md", ".markdown"}
 _TEXT_SUFFIXES = {
     ".txt", ".md", ".markdown", ".rst",
     ".py", ".js", ".ts", ".json", ".yaml", ".yml", ".html", ".css",
 }
+
+Splitter = Callable[[str, int, int], list[str]]
+
+_SPLITTERS: dict[str, Splitter] = {
+    "text": split_text,
+    "markdown": split_markdown,
+    "python": split_python,
+}
+_EXTENSION_SPLITTERS: dict[str, str] = {".md": "markdown", ".markdown": "markdown", ".py": "python"}
+
+
+def _resolve_splitter(splitter: "str | Splitter") -> Splitter:
+    if callable(splitter):
+        return splitter
+    try:
+        return _SPLITTERS[splitter]
+    except KeyError:
+        raise ValueError(
+            f"Unknown splitter {splitter!r}; choose one of {sorted(_SPLITTERS)} or pass a callable"
+        ) from None
+
+
+class IngestResult(list):
+    """A list[int] of document ids, with a `.timings` dict attached.
+
+    The same transparency `Hits` gives you for search, applied to
+    ingestion: `chunk_ms`/`embed_ms`/`store_ms`/`ann_ms`/`total_ms` show
+    where the time actually went, and `docs_per_second` gives you
+    throughput. For any real corpus, `embed_ms` dominates — this exists
+    so you can see that for yourself instead of taking our word for it.
+    """
+
+    timings: dict[str, float]
 
 
 class Index:
@@ -57,6 +91,7 @@ class Index:
         self._store = Store(path)
         self._embedder = make_embedder(embedder, self._store)
         self._ann = load_ann_index(self._store, _COLLECTION)
+        self._alock = asyncio.Lock()
 
     def add_text(
         self,
@@ -67,25 +102,25 @@ class Index:
         metadata: dict[str, Any] | None = None,
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
-        markdown: bool = False,
+        splitter: "str | Splitter" = "text",
     ) -> int:
         """Index a single piece of text as one document. Returns the document id.
 
         `metadata` is attached to every chunk this document splits into,
-        and is what `search(where=...)` filters against.
+        and is what `search(where=...)` filters against. `splitter` is
+        `"text"` (default), `"markdown"`, `"python"`, or your own
+        `fn(text, chunk_size, chunk_overlap) -> list[str]`.
         """
-        document_id = self._ingest_one(
-            text,
-            source=source,
+        result = self.add_texts(
+            [text],
+            sources=[source],
             namespace=namespace,
             metadata=metadata,
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
-            markdown=markdown,
+            splitter=splitter,
         )
-        save_ann_index(self._store, _COLLECTION, self._ann)
-        self._store.clear_query_cache()
-        return document_id
+        return result[0]
 
     def add_texts(
         self,
@@ -96,32 +131,76 @@ class Index:
         metadata: dict[str, Any] | None = None,
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
-        markdown: bool = False,
-    ) -> list[int]:
-        """Index multiple standalone texts in one call. Returns their document ids.
+        splitter: "str | Splitter" = "text",
+    ) -> IngestResult:
+        """Index multiple standalone texts in one call. Returns document ids
+        (an `IngestResult` — a list with a `.timings` breakdown attached).
 
-        Prefer this over calling `add_text()` in a loop for anything more
-        than a handful of documents: the vector index is only persisted
-        once at the end here, instead of once per document, which is the
-        difference between O(n) and O(n^2) work as your corpus grows.
+        True batch ingestion, not a loop: every document is chunked, then
+        every chunk across the *whole* batch is embedded in one call to
+        the embedder, then every vector is added to the ANN index in one
+        call — not once per document. Batching the SQLite transaction
+        alone was worth ~3x on its own (see `Store.transaction()`);
+        batching the embed and ANN-insert calls on top of that closes the
+        rest of the per-document-loop overhead. See `bench/` and
+        README.md's Performance section for measured numbers.
         """
+        if not texts:
+            result = IngestResult()
+            result.timings = {}
+            return result
+
         sources = sources or [None] * len(texts)
-        document_ids = [
-            self._ingest_one(
-                text,
-                source=source,
-                namespace=namespace,
-                metadata=metadata,
-                chunk_size=chunk_size,
-                chunk_overlap=chunk_overlap,
-                markdown=markdown,
-            )
-            for text, source in zip(texts, sources)
-        ]
-        if document_ids:
+        split = _resolve_splitter(splitter)
+        timings: dict[str, float] = {}
+        start = time.perf_counter()
+
+        t0 = time.perf_counter()
+        target_namespace = resolve_writable_namespace(self.policy, self.namespace, namespace)
+        per_doc_chunks: list[list[str]] = []
+        all_chunk_texts: list[str] = []
+        for text in texts:
+            chunks = split(text, chunk_size, chunk_overlap)
+            if not chunks:
+                raise ValueError("got no text to index (empty after stripping)")
+            per_doc_chunks.append(chunks)
+            all_chunk_texts.extend(chunks)
+        timings["chunk_ms"] = _ms_since(t0)
+
+        t0 = time.perf_counter()
+        all_vectors = self._embedder.embed(all_chunk_texts)
+        timings["embed_ms"] = _ms_since(t0)
+
+        document_ids: list[int] = []
+        all_chunk_ids: list[int] = []
+        with self._store.transaction():
+            t0 = time.perf_counter()
+            for text, source, chunks in zip(texts, sources, per_doc_chunks):
+                document_id = self._store.insert_document(target_namespace, source=source, metadata=metadata)
+                # Every chunk inherits the document's metadata (v0.1 has no
+                # per-chunk metadata) so `search(where=...)` can actually
+                # filter by what the caller passed in.
+                chunk_metadatas = [metadata or {} for _ in chunks]
+                chunk_ids = self._store.insert_chunks(document_id, target_namespace, chunks, chunk_metadatas)
+                document_ids.append(document_id)
+                all_chunk_ids.extend(chunk_ids)
+            timings["store_ms"] = _ms_since(t0)
+
+            t0 = time.perf_counter()
+            if self._ann is None:
+                self._ann = AnnIndex(dim=len(all_vectors[0]))
+            self._ann.add(all_chunk_ids, all_vectors)
             save_ann_index(self._store, _COLLECTION, self._ann)
             self._store.clear_query_cache()
-        return document_ids
+            timings["ann_ms"] = _ms_since(t0)
+
+        total_seconds = time.perf_counter() - start
+        timings["total_ms"] = total_seconds * 1000
+        timings["docs_per_second"] = len(texts) / total_seconds if total_seconds > 0 else 0.0
+
+        result = IngestResult(document_ids)
+        result.timings = timings
+        return result
 
     def add_files(
         self,
@@ -133,68 +212,59 @@ class Index:
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
         encoding: str = "utf-8",
-    ) -> list[int]:
-        """Index every readable text file under `path` (or a single file). Returns document ids.
+        splitter: "str | Splitter" = "auto",
+    ) -> IngestResult:
+        """Index every readable text file under `path` (or a single file).
+        Returns document ids (an `IngestResult` — a list with a `.timings`
+        breakdown attached, summed across every batch below).
+
+        `splitter="auto"` (the default) picks a splitter per file by
+        extension: `.py` gets the AST-aware Python splitter (a chunk never
+        cuts a function or class in half), `.md`/`.markdown` get the
+        markdown splitter, everything else gets the plain text splitter.
+        Pass an explicit splitter name or callable to force the same one
+        for every file. Files are grouped by their resolved splitter and
+        each group is ingested as one batch via `add_texts()`.
 
         Only recognized text extensions are read (see `_TEXT_SUFFIXES`);
         anything else is skipped rather than raising, since walking a real
         docs/ directory usually turns up a few images or lockfiles you
         didn't mean to index.
         """
-        document_ids = []
+        groups: dict[Any, tuple[list[str], list[str]]] = {}
         for file_path in _iter_text_files(Path(path), pattern):
             text = file_path.read_text(encoding=encoding, errors="ignore")
             if not text.strip():
                 continue
-            document_ids.append(
-                self._ingest_one(
-                    text,
-                    source=str(file_path),
-                    namespace=namespace,
-                    metadata=metadata,
-                    chunk_size=chunk_size,
-                    chunk_overlap=chunk_overlap,
-                    markdown=file_path.suffix.lower() in _MARKDOWN_SUFFIXES,
-                )
+            resolved = splitter
+            if splitter == "auto":
+                resolved = _EXTENSION_SPLITTERS.get(file_path.suffix.lower(), "text")
+            group_texts, group_sources = groups.setdefault(resolved, ([], []))
+            group_texts.append(text)
+            group_sources.append(str(file_path))
+
+        document_ids = IngestResult()
+        merged_timings: dict[str, float] = {}
+        for resolved_splitter, (group_texts, group_sources) in groups.items():
+            batch = self.add_texts(
+                group_texts,
+                sources=group_sources,
+                namespace=namespace,
+                metadata=metadata,
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+                splitter=resolved_splitter,
             )
-        if document_ids:
-            save_ann_index(self._store, _COLLECTION, self._ann)
-            self._store.clear_query_cache()
+            document_ids.extend(batch)
+            for key, value in batch.timings.items():
+                if key == "docs_per_second":
+                    continue
+                merged_timings[key] = merged_timings.get(key, 0.0) + value
+
+        total_ms = merged_timings.get("total_ms", 0.0)
+        merged_timings["docs_per_second"] = len(document_ids) / (total_ms / 1000) if total_ms > 0 else 0.0
+        document_ids.timings = merged_timings
         return document_ids
-
-    def _ingest_one(
-        self,
-        text: str,
-        *,
-        source: str | None,
-        namespace: str | None,
-        metadata: dict[str, Any] | None,
-        chunk_size: int,
-        chunk_overlap: int,
-        markdown: bool,
-    ) -> int:
-        """Chunk, embed, and store one document — everything add_text/add_texts/add_files
-        share. Does *not* persist the ANN index; callers save once after their own batch.
-        """
-        target_namespace = resolve_writable_namespace(self.policy, self.namespace, namespace)
-        splitter = split_markdown if markdown else split_text
-        chunks = splitter(text, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
-        if not chunks:
-            raise ValueError("got no text to index (empty after stripping)")
-
-        document_id = self._store.insert_document(target_namespace, source=source, metadata=metadata)
-        # Every chunk inherits the document's metadata (v0.1 has no
-        # per-chunk metadata) so `search(where=...)` can actually filter
-        # by what the caller passed to add_text/add_texts/add_files.
-        chunk_metadatas = [metadata or {} for _ in chunks]
-        chunk_ids = self._store.insert_chunks(document_id, target_namespace, chunks, chunk_metadatas)
-
-        vectors = self._embedder.embed(chunks)
-        if self._ann is None:
-            self._ann = AnnIndex(dim=len(vectors[0]))
-        self._ann.add(chunk_ids, vectors)
-
-        return document_id
 
     def search(
         self,
@@ -247,11 +317,12 @@ class Index:
                 f"{self.namespace!r} is not allowed to delete from namespace {document.namespace!r}"
             )
         chunk_ids = self._store.get_chunk_ids_for_document(document_id)
-        self._store.delete_document(document_id)
-        if self._ann is not None and chunk_ids:
-            self._ann.remove(chunk_ids)
-            save_ann_index(self._store, _COLLECTION, self._ann)
-        self._store.clear_query_cache()
+        with self._store.transaction():
+            self._store.delete_document(document_id)
+            if self._ann is not None and chunk_ids:
+                self._ann.remove(chunk_ids)
+                save_ann_index(self._store, _COLLECTION, self._ann)
+            self._store.clear_query_cache()
 
     def close(self) -> None:
         self._store.close()
@@ -262,6 +333,35 @@ class Index:
     def __exit__(self, *exc_info: object) -> None:
         self.close()
 
+    # -- async surface -----------------------------------------------------
+    #
+    # Thin wrappers: the underlying work (SQLite I/O, ONNX inference) runs
+    # in a thread pool via asyncio.to_thread so it doesn't block the event
+    # loop, guarded by a per-instance lock. The lock is deliberately
+    # coarse — it serializes every async call against this one Index
+    # instance, reads included — because usearch's C extension isn't
+    # documented as safe for concurrent mutation from multiple threads,
+    # and a crash or corrupted index is a much worse failure mode than
+    # giving up some read concurrency. Open separate Index instances (they
+    # share the underlying file fine under SQLite's WAL mode) if you need
+    # true concurrent access.
+
+    async def aadd_text(self, text: str, **kwargs: Any) -> int:
+        async with self._alock:
+            return await asyncio.to_thread(self.add_text, text, **kwargs)
+
+    async def aadd_texts(self, texts: list[str], **kwargs: Any) -> IngestResult:
+        async with self._alock:
+            return await asyncio.to_thread(self.add_texts, texts, **kwargs)
+
+    async def aadd_files(self, path: str, **kwargs: Any) -> IngestResult:
+        async with self._alock:
+            return await asyncio.to_thread(self.add_files, path, **kwargs)
+
+    async def asearch(self, query: str, **kwargs: Any) -> Hits:
+        async with self._alock:
+            return await asyncio.to_thread(self.search, query, **kwargs)
+
 
 def _iter_text_files(path: Path, pattern: str) -> Iterable[Path]:
     if path.is_file():
@@ -271,3 +371,7 @@ def _iter_text_files(path: Path, pattern: str) -> Iterable[Path]:
     for candidate in sorted(path.glob(pattern)):
         if candidate.is_file() and candidate.suffix.lower() in _TEXT_SUFFIXES:
             yield candidate
+
+
+def _ms_since(t0: float) -> float:
+    return (time.perf_counter() - t0) * 1000

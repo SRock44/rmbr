@@ -20,6 +20,17 @@ from usearch.index import Index as _UsearchIndex
 
 DEFAULT_METRIC = "cos"
 
+# usearch's own defaults (connectivity=16, expansion_add=128,
+# expansion_search=64) measurably under-recall once a collection gets
+# into the thousands of vectors: benched at recall@5=0.68 on a 5,000-doc
+# corpus vs 0.94+ here. expansion_search=256 alone gets recall@5 to 0.94
+# at ~0.36ms/query (from usearch's own default ~0.68 at ~0.14ms/query);
+# pairing it with expansion_add=256 nudges that to 0.95 for ~30% more
+# build time - both still sub-millisecond and sub-second respectively,
+# so there's no real reason to keep the leaner defaults. See bench/.
+DEFAULT_EXPANSION_ADD = 256
+DEFAULT_EXPANSION_SEARCH = 256
+
 
 class AnnIndex:
     """A single collection's vector index (e.g. all chunks, or all memories).
@@ -29,10 +40,22 @@ class AnnIndex:
     whatever int you give it.
     """
 
-    def __init__(self, dim: int, metric: str = DEFAULT_METRIC):
+    def __init__(
+        self,
+        dim: int,
+        metric: str = DEFAULT_METRIC,
+        expansion_add: int = DEFAULT_EXPANSION_ADD,
+        expansion_search: int = DEFAULT_EXPANSION_SEARCH,
+    ):
         self.dim = dim
         self.metric = metric
-        self._index = _UsearchIndex(ndim=dim, metric=metric, dtype="f32")
+        self._index = _UsearchIndex(
+            ndim=dim,
+            metric=metric,
+            dtype="f32",
+            expansion_add=expansion_add,
+            expansion_search=expansion_search,
+        )
 
     def __len__(self) -> int:
         return len(self._index)
@@ -82,3 +105,4 @@ class AnnIndex:
         instance = cls(dim=dim, metric=metric)
         instance._index.load(blob)
         return instance
+
