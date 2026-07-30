@@ -91,4 +91,11 @@ def build_mcp_server(
 
 
 def _hit_to_dict(hit: Hit) -> dict[str, Any]:
-    return {"id": hit.id, "text": hit.text, "score": hit.score, "metadata": hit.metadata}
+    return {
+        "id": hit.id,
+        "text": hit.text,
+        "score": hit.score,
+        "metadata": hit.metadata,
+        "bm25_score": hit.bm25_score,
+        "vector_score": hit.vector_score,
+    }

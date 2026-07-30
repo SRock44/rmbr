@@ -32,6 +32,7 @@ from .ann import AnnIndex
 from .chunk import DEFAULT_CHUNK_OVERLAP, DEFAULT_CHUNK_SIZE, split_markdown, split_python, split_text
 from .embed import Embedder
 from .policy import Policy
+from .rerank import CrossEncoderReranker
 from .search import Hits, hybrid_search
 from .store import Store
 
@@ -92,6 +93,7 @@ class Index:
         self._embedder = make_embedder(embedder, self._store)
         self._ann = load_ann_index(self._store, _COLLECTION)
         self._alock = asyncio.Lock()
+        self._reranker: CrossEncoderReranker | None = None
 
     def add_text(
         self,
@@ -276,6 +278,8 @@ class Index:
         use_bm25: bool = True,
         use_vectors: bool = True,
         budget_ms: float | None = None,
+        min_similarity: float | None = None,
+        rerank: bool = False,
     ) -> Hits:
         """Hybrid search over indexed chunks. Returns Hits — hits[0].text, hits[0].score, hits.timings.
 
@@ -284,8 +288,19 @@ class Index:
         `use_vectors=False` for pure keyword search.
 
         `where` filters to chunks whose metadata matches every key/value
-        given, e.g. `idx.search(q, where={"source": "docs/deploy.md"})` —
-        equality only in v0.1, no operators.
+        given, e.g. `idx.search(q, where={"source": "docs/deploy.md"})`.
+        A plain value is equality; a `{"$gt": ...}`-style dict is an
+        operator comparison (`$eq`/`$ne`/`$gt`/`$gte`/`$lt`/`$lte`/`$in`/
+        `$nin`) — see `search.hybrid_search`'s docstring for the full set.
+
+        `min_similarity` drops hits below that raw cosine similarity
+        (requires `use_vectors=True`) — a real confidence gate, unlike
+        thresholding on `hit.score` itself.
+
+        `rerank=True` re-scores the candidate pool with a local
+        cross-encoder (`rerank.CrossEncoderReranker`, lazily loaded on
+        first use) for higher precision at extra latency; `hit.score`
+        becomes the cross-encoder's score when this is on.
         """
         readable = resolve_readable_namespaces(
             self.policy, self.namespace, namespaces, self._store.list_chunk_namespaces
@@ -303,7 +318,14 @@ class Index:
             where=where,
             budget_ms=budget_ms,
             query_cache=self._store,
+            min_similarity=min_similarity,
+            reranker=self._get_reranker() if rerank else None,
         )
+
+    def _get_reranker(self) -> CrossEncoderReranker:
+        if self._reranker is None:
+            self._reranker = CrossEncoderReranker()
+        return self._reranker
 
     def delete(self, document_id: int) -> None:
         """Delete a document, its chunks, and their vectors. No-op if it doesn't exist."""

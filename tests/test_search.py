@@ -206,3 +206,160 @@ def test_cached_result_not_reused_across_different_where_filters(rig):
     )
     assert filtered.from_cache is False
     assert len(filtered) == 0
+
+
+def test_where_gt_operator(rig):
+    store, embedder, ann_index, add_chunk = rig
+    add_chunk("researcher", "release notes", metadata={"price": 5})
+    add_chunk("researcher", "release notes", metadata={"price": 15})
+
+    hits = search(store, embedder, ann_index, "release notes", ["researcher"], where={"price": {"$gt": 10}})
+    assert len(hits) == 1
+    assert hits[0].metadata["price"] == 15
+
+
+def test_where_in_operator(rig):
+    store, embedder, ann_index, add_chunk = rig
+    add_chunk("researcher", "release notes", metadata={"tag": "a"})
+    add_chunk("researcher", "release notes", metadata={"tag": "b"})
+    add_chunk("researcher", "release notes", metadata={"tag": "c"})
+
+    hits = search(
+        store, embedder, ann_index, "release notes", ["researcher"], where={"tag": {"$in": ["a", "b"]}}, k=10
+    )
+    assert {h.metadata["tag"] for h in hits} == {"a", "b"}
+
+
+def test_where_operator_on_missing_field_does_not_match(rig):
+    store, embedder, ann_index, add_chunk = rig
+    add_chunk("researcher", "release notes", metadata={})
+
+    hits = search(store, embedder, ann_index, "release notes", ["researcher"], where={"price": {"$gt": 10}})
+    assert len(hits) == 0
+
+
+def test_where_unsupported_operator_raises(rig):
+    store, embedder, ann_index, add_chunk = rig
+    add_chunk("researcher", "release notes", metadata={"price": 5})
+
+    with pytest.raises(ValueError, match="Unsupported where operator"):
+        search(store, embedder, ann_index, "release notes", ["researcher"], where={"price": {"$bogus": 5}})
+
+
+def test_hits_carry_raw_bm25_and_vector_scores(rig):
+    store, embedder, ann_index, add_chunk = rig
+    add_chunk("researcher", "quarterly revenue report")
+
+    hits = search(store, embedder, ann_index, "quarterly revenue report", ["researcher"])
+    assert hits[0].bm25_score is not None
+    assert hits[0].vector_score is not None
+    assert -1.0 <= hits[0].vector_score <= 1.0
+
+
+def test_min_similarity_drops_weak_vector_matches(rig):
+    store, embedder, ann_index, add_chunk = rig
+    add_chunk("researcher", "quarterly revenue report")
+
+    all_hits = search(store, embedder, ann_index, "quarterly revenue report", ["researcher"])
+    assert len(all_hits) == 1
+    real_similarity = all_hits[0].vector_score
+
+    filtered = search(
+        store,
+        embedder,
+        ann_index,
+        "quarterly revenue report",
+        ["researcher"],
+        min_similarity=real_similarity + 0.5,  # deliberately unreachable
+    )
+    assert len(filtered) == 0
+
+
+def test_min_similarity_requires_use_vectors(rig):
+    store, embedder, ann_index, add_chunk = rig
+    add_chunk("researcher", "quarterly revenue report")
+
+    with pytest.raises(ValueError, match="min_similarity requires use_vectors"):
+        search(
+            store,
+            embedder,
+            ann_index,
+            "quarterly revenue report",
+            ["researcher"],
+            use_vectors=False,
+            min_similarity=0.5,
+        )
+
+
+def test_recency_weight_favors_newer_record(rig):
+    store, embedder, ann_index, add_chunk = rig
+    # Both chunks are textually and semantically identical to the query, so
+    # without recency weighting they'd tie (or order arbitrarily); recency
+    # should be the deciding factor.
+    old_id = add_chunk("researcher", "status update")
+    new_id = add_chunk("researcher", "status update")
+
+    class FakeRecord:
+        def __init__(self, id_, created_at):
+            self.id = id_
+            self.created_at = created_at
+
+    old_ts = "2020-01-01T00:00:00+00:00"
+    new_ts = "2030-01-01T00:00:00+00:00"
+    original_get_chunks = store.get_chunks
+
+    def get_chunks_with_timestamps(ids):
+        records = original_get_chunks(ids)
+        timestamps = {old_id: old_ts, new_id: new_ts}
+        for r in records:
+            r.created_at = timestamps.get(r.id, new_ts)
+        return records
+
+    hits = hybrid_search(
+        query="status update",
+        namespaces=["researcher"],
+        k=5,
+        fts_search=store.search_chunks_fts,
+        fetch_records=get_chunks_with_timestamps,
+        ann_index=ann_index,
+        embedder=embedder,
+        recency_weight=1.0,
+        recency_half_life_seconds=3600,
+        record_timestamp=lambda r: r.created_at,
+    )
+    assert hits[0].id == new_id
+
+
+def test_recency_weight_requires_record_timestamp(rig):
+    store, embedder, ann_index, add_chunk = rig
+    add_chunk("researcher", "status update")
+
+    with pytest.raises(ValueError, match="recency_weight requires record_timestamp"):
+        search(store, embedder, ann_index, "status update", ["researcher"], recency_weight=1.0)
+
+
+def test_rerank_reorders_by_reranker_score(rig):
+    store, embedder, ann_index, add_chunk = rig
+    # Both chunks match BM25/vector search about equally well (same
+    # keywords, similar phrasing) - a fake reranker that scores purely by
+    # exact text, independent of retrieval order, proves the final order
+    # came from the reranker, not from RRF.
+    weak_id = add_chunk("researcher", "the deployment guide covers docker")
+    strong_id = add_chunk("researcher", "another deployment guide covers docker too")
+
+    class TextKeyedReranker:
+        model_name = "fake-reranker"
+
+        def rerank(self, query, documents):
+            preferred = "another deployment guide covers docker too"
+            return [1.0 if doc == preferred else 0.0 for doc in documents]
+
+    hits = search(
+        store, embedder, ann_index, "docker deployment", ["researcher"], reranker=TextKeyedReranker()
+    )
+    assert len(hits) == 2
+    assert hits[0].id == strong_id
+    assert hits[0].score == 1.0
+    assert hits[1].id == weak_id
+    assert hits[1].score == 0.0
+    assert "rerank_ms" in hits.timings

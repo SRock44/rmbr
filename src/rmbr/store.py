@@ -345,6 +345,47 @@ class Store:
         self.conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
         self._commit()
 
+    def update_memory(self, memory_id: int, text: str, metadata: dict[str, Any] | None = None) -> None:
+        """Overwrite a memory's text/metadata in place and bump its timestamp.
+
+        Used by `Memory.remember()`'s similarity-based dedupe: updating
+        instead of inserting keeps the row's id stable (existing
+        references to it, e.g. from `forget()`, keep working) and the
+        `memories_au` FTS trigger keeps the keyword index in sync for
+        free.
+        """
+        self.conn.execute(
+            "UPDATE memories SET text = ?, metadata = ?, created_at = ? WHERE id = ?",
+            (text, json.dumps(metadata or {}), _now(), memory_id),
+        )
+        self._commit()
+
+    def delete_memories_before(self, namespace: str, cutoff: str) -> list[int]:
+        """Delete memories in `namespace` older than `cutoff` (an ISO-8601 timestamp). Returns the deleted ids."""
+        rows = self.conn.execute(
+            "SELECT id FROM memories WHERE namespace = ? AND created_at < ?", (namespace, cutoff)
+        ).fetchall()
+        ids = [row["id"] for row in rows]
+        if ids:
+            self.conn.execute(
+                "DELETE FROM memories WHERE namespace = ? AND created_at < ?", (namespace, cutoff)
+            )
+            self._commit()
+        return ids
+
+    def delete_oldest_memories_beyond(self, namespace: str, keep: int) -> list[int]:
+        """Delete all but the `keep` most recent memories in `namespace`. Returns the deleted ids."""
+        rows = self.conn.execute(
+            "SELECT id FROM memories WHERE namespace = ? ORDER BY created_at DESC LIMIT -1 OFFSET ?",
+            (namespace, keep),
+        ).fetchall()
+        ids = [row["id"] for row in rows]
+        if ids:
+            placeholders = ",".join("?" * len(ids))
+            self.conn.execute(f"DELETE FROM memories WHERE id IN ({placeholders})", ids)
+            self._commit()
+        return ids
+
     def search_memories_fts(
         self, query: str, namespaces: list[str], limit: int
     ) -> list[ScoredId]:

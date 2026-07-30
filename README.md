@@ -6,7 +6,7 @@
 
 `rmbr` ("remember", vowels deleted) is an embedded, local-first **memory + retrieval engine for AI agents and LLM apps** — what SQLite is to Postgres, rmbr aims to be to hosted memory services.
 
-> **v0.1.1.** `pip install rmbr` gets you a working library: `Memory`, `Index`, `Policy`, and MCP support (below), all implemented and tested — see [docs/PLAN.md](docs/PLAN.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design.
+> **v0.2.0.** `pip install rmbr` gets you a working library: `Memory`, `Index`, `Policy`, and MCP support (below), all implemented and tested — see [docs/PLAN.md](docs/PLAN.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design.
 
 ## Why
 
@@ -84,6 +84,46 @@ This isn't Claude-specific. `hit.text` is a plain Python string with no wrapper,
 
 Want the embedding itself to come from OpenAI instead of the local default? `Memory("agents.db", namespace="assistant", embedder=OpenAIEmbedder())` (`pip install rmbr[openai]`) — same `Embedder` protocol, same rest of the API.
 
+### Keeping memory accurate over time
+
+`remember()` inserting forever is fine for a while, then it isn't: near-duplicate notes pile up, and nothing ever expires. rmbr doesn't have an LLM to judge "is this the same fact" the way mem0's extraction loop does — everything below is deterministic vector-similarity/time-based engineering instead, opt-in because a false-positive match is a worse failure than a duplicate:
+
+```python
+# Update-in-place instead of appending, above a cosine-similarity threshold.
+# Off by default — no LLM here to judge intent, so keep it conservative (0.92-0.95).
+mem = Memory("agents.db", namespace="assistant", dedupe_threshold=0.93)
+mem.remember("user prefers dark mode")       # inserts
+mem.remember("user really prefers dark mode")  # updates the same row if similarity clears the bar
+
+# Bound growth automatically (evicts the oldest beyond the cap on every remember()),
+# or prune on your own schedule:
+mem = Memory("agents.db", namespace="assistant", max_memories=5000)
+mem.forget_older_than(60 * 60 * 24 * 30)     # delete anything older than 30 days
+```
+
+### Precision knobs for search
+
+`search()`/`recall()` default to plain hybrid ranking, but three things are available when relevance quality matters more than the default:
+
+```python
+# Richer where= filtering: equality by default, $eq/$ne/$gt/$gte/$lt/$lte/$in/$nin as operators.
+idx.search("deploy", where={"updated_at": {"$gt": "2026-01-01"}})
+
+# A real confidence gate — filters on the raw cosine similarity (hit.vector_score),
+# not hit.score itself, which is an RRF rank-sum with no fixed scale to threshold on.
+idx.search("deploy", min_similarity=0.6)
+
+# Recency-weighted ranking for Memory.recall() (not yet Index.search() — chunks
+# aren't individually timestamped): a fresher memory can outrank an equally
+# relevant older one. recency_weight=0.0 (off) by default.
+mem.recall("user preferences", recency_weight=0.05, recency_half_life_seconds=7 * 86400)
+
+# A local cross-encoder re-scores the candidate pool for higher precision at
+# extra latency — same fastembed dependency already installed, no new network
+# call, no API key. hit.score becomes the cross-encoder's score when this is on.
+idx.search("deploy", rerank=True)
+```
+
 ### Restricting access between agents
 
 ```python
@@ -145,7 +185,7 @@ git clone https://github.com/SRock44/rmbr.git
 cd rmbr
 python -m venv .venv && source .venv/bin/activate   # .venv\Scripts\activate on Windows
 pip install --only-binary :all: -e .
-pytest tests/    # 129 tests, no network or API key required
+pytest tests/    # 151 tests, no network or API key required
 ```
 
 The default embedder (`fastembed`, a local ONNX model) downloads its model weights on first use. Every test in `tests/` instead uses `rmbr.embed.FakeEmbedder` — a deterministic, dependency-free embedder — so the suite runs fully offline; you can inject the same `FakeEmbedder` into your own tests via `Memory(..., embedder=FakeEmbedder())` / `Index(..., embedder=FakeEmbedder())`.
@@ -197,6 +237,8 @@ Three tools, all pinned to whatever namespace you pass at startup (see [Multi-ag
 - **`search(query, k=5)`** — hybrid search over documents added via `Index`
 - **`recall(query, k=5)`** — search over notes saved via `Memory`
 - **`remember(text)`** — save a new memory. Not present in the tool list at all — not just permission-denied — when `read_only=True`.
+
+Each result includes `bm25_score`/`vector_score` (the raw signals behind `score`) alongside `text`/`metadata` — useful if the calling agent wants to weight or filter results by confidence rather than trust every hit equally. `min_similarity`, `recency_weight`, and `rerank` (see [Precision knobs for search](#precision-knobs-for-search) above) aren't exposed as MCP tool parameters yet — the tool schemas stay minimal on purpose; configure them at `serve_mcp()`'s call site via a custom `Index`/`Memory` if you need them server-side.
 
 ### Connecting a client
 
@@ -280,9 +322,10 @@ Full data and every candidate's per-category breakdown: `python bench/quality.py
 
 ## Roadmap
 
-- **v0.1 (done in this repo, not yet released to PyPI)** — `Memory` + `Policy` + `Index` (hybrid BM25 + vector search, metadata filtering), embedding + semantic query caches, MCP support (namespace-pinned), 3-OS CI (Linux/Windows/macOS), true batch ingestion with per-stage timings, async API surface (`a`-prefixed methods), a Python-aware chunker (stdlib `ast`, no added dependency), one hosted embedding provider (OpenAI), a 150-example quality eval that confirmed the default embedder against local alternatives, real single-call and bulk benchmark numbers, PyPI trusted publishing
-- **Known gaps** — Voyage/Cohere embedding providers (same `Embedder` protocol as `OpenAIEmbedder`, not yet written), more auto-detected chunkers (currently text/markdown/python)
-- **Next** — cut the v0.1.0 release
+- **v0.1** — `Memory` + `Policy` + `Index` (hybrid BM25 + vector search, metadata filtering), embedding + semantic query caches, MCP support (namespace-pinned), 3-OS CI (Linux/Windows/macOS), true batch ingestion with per-stage timings, async API surface (`a`-prefixed methods), a Python-aware chunker (stdlib `ast`, no added dependency), one hosted embedding provider (OpenAI), a 150-example quality eval that confirmed the default embedder against local alternatives, real single-call and bulk benchmark numbers, PyPI trusted publishing, a `uvx`-launchable console script, and a listing on the [official MCP registry](https://registry.modelcontextprotocol.io)
+- **v0.2** — similarity-based memory dedupe/update (`dedupe_threshold`), bounded retention (`max_memories`, `forget_older_than`), recency-weighted ranking for `Memory.recall()`, richer `where=` filtering (`$gt`/`$gte`/`$lt`/`$lte`/`$in`/`$nin`/`$ne`, not just equality), a real confidence gate on raw cosine similarity (`min_similarity`, plus `hit.bm25_score`/`hit.vector_score` on every result), and an optional local cross-encoder reranker (`rerank=True`)
+- **Known gaps** — Voyage/Cohere embedding providers (same `Embedder` protocol as `OpenAIEmbedder`, not yet written), more auto-detected chunkers (currently text/markdown/python), recency-weighted ranking isn't available for `Index.search()` yet (chunks aren't individually timestamped)
+- **Next** — a pluggable consolidation hook (`mem.consolidate(extractor)`): rmbr still never calls an LLM itself, but a caller-supplied extractor callable would let rmbr orchestrate mem0-style fact extraction/dedup/update against your own model choice, without rmbr owning an API key. Design in progress, not yet built.
 
 ## License
 
