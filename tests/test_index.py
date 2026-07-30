@@ -181,3 +181,14 @@ def test_index_persists_across_instances(tmp_path):
     reopened = make_index(db)
     hits = reopened.search("persisted document")
     assert len(hits) == 1
+
+
+def test_search_where_filters_by_metadata(tmp_path):
+    db = tmp_path / "agents.db"
+    idx = make_index(db)
+    idx.add_text("deployment guide for docker", source="docs/deploy.md", metadata={"team": "infra"})
+    idx.add_text("deployment guide for testing", source="docs/test.md", metadata={"team": "qa"})
+
+    hits = idx.search("deployment guide", where={"team": "infra"})
+    assert len(hits) == 1
+    assert hits[0].metadata["team"] == "infra"

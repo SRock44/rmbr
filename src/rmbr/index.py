@@ -69,7 +69,11 @@ class Index:
         chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
         markdown: bool = False,
     ) -> int:
-        """Index a single piece of text as one document. Returns the document id."""
+        """Index a single piece of text as one document. Returns the document id.
+
+        `metadata` is attached to every chunk this document splits into,
+        and is what `search(where=...)` filters against.
+        """
         document_id = self._ingest_one(
             text,
             source=source,
@@ -179,7 +183,11 @@ class Index:
             raise ValueError("got no text to index (empty after stripping)")
 
         document_id = self._store.insert_document(target_namespace, source=source, metadata=metadata)
-        chunk_ids = self._store.insert_chunks(document_id, target_namespace, chunks)
+        # Every chunk inherits the document's metadata (v0.1 has no
+        # per-chunk metadata) so `search(where=...)` can actually filter
+        # by what the caller passed to add_text/add_texts/add_files.
+        chunk_metadatas = [metadata or {} for _ in chunks]
+        chunk_ids = self._store.insert_chunks(document_id, target_namespace, chunks, chunk_metadatas)
 
         vectors = self._embedder.embed(chunks)
         if self._ann is None:
@@ -194,6 +202,7 @@ class Index:
         *,
         k: int = 5,
         namespaces: str | list[str] | None = None,
+        where: dict[str, Any] | None = None,
         use_bm25: bool = True,
         use_vectors: bool = True,
         budget_ms: float | None = None,
@@ -203,6 +212,10 @@ class Index:
         Hybrid (both signals, the default) is what you want for real
         queries. Set `use_bm25=False` for pure semantic search, or
         `use_vectors=False` for pure keyword search.
+
+        `where` filters to chunks whose metadata matches every key/value
+        given, e.g. `idx.search(q, where={"source": "docs/deploy.md"})` —
+        equality only in v0.1, no operators.
         """
         readable = resolve_readable_namespaces(
             self.policy, self.namespace, namespaces, self._store.list_chunk_namespaces
@@ -217,6 +230,7 @@ class Index:
             embedder=self._embedder,
             use_bm25=use_bm25,
             use_vectors=use_vectors,
+            where=where,
             budget_ms=budget_ms,
             query_cache=self._store,
         )

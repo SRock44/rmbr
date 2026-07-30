@@ -80,6 +80,7 @@ def hybrid_search(
     use_vectors: bool = True,
     budget_ms: float | None = None,
     oversample: int = DEFAULT_OVERSAMPLE,
+    where: dict[str, Any] | None = None,
     query_cache: "Store | None" = None,
     cache_ttl_seconds: float = DEFAULT_CACHE_TTL_SECONDS,
     cache_threshold: float = DEFAULT_CACHE_THRESHOLD,
@@ -95,6 +96,14 @@ def hybrid_search(
     ``use_bm25=False`` gives pure vector/semantic search; ``use_vectors=False``
     gives pure keyword search — both are legitimate modes, not just
     intermediate states, and RRF fusion only kicks in when both run.
+
+    ``where`` filters results to records whose metadata matches every
+    key/value pair given (equality only, like ``{"category": "docs"}`` —
+    no operators in v0.1). Applied as a post-filter on the same candidate
+    pool BM25/ANN already returned rather than pushed into SQL, so it
+    shares the same oversample-then-filter tradeoff as namespace
+    filtering below: a filter that's very selective against a large
+    candidate pool can return fewer than ``k`` hits.
 
     If ``budget_ms`` is set and time runs out before the vector stage
     (query embedding + ANN search) would start, that stage is skipped and
@@ -113,7 +122,10 @@ def hybrid_search(
     want_vectors = use_vectors and ann_index is not None and embedder is not None and len(ann_index) > 0
     want_cache = want_vectors and query_cache is not None
     query_vector: np.ndarray | None = None
-    cache_namespace = ",".join(sorted(namespaces))
+    # `where` is folded into the cache scope so a cached unfiltered result
+    # can never be handed back for a filtered query (or vice versa) - a
+    # correctness requirement, not an optimization.
+    cache_scope = ",".join(sorted(namespaces)) + "|" + json.dumps(where, sort_keys=True)
 
     if (want_vectors or want_cache) and not over_budget():
         t0 = time.perf_counter()
@@ -123,7 +135,7 @@ def hybrid_search(
     if want_cache and query_vector is not None and not over_budget():
         t0 = time.perf_counter()
         cached = _check_query_cache(
-            query_cache, cache_namespace, query_vector, k, cache_threshold, cache_ttl_seconds
+            query_cache, cache_scope, query_vector, k, cache_threshold, cache_ttl_seconds
         )
         timings["cache_ms"] = _ms_since(t0)
         if cached is not None:
@@ -149,10 +161,16 @@ def hybrid_search(
     t0 = time.perf_counter()
     candidate_ids = {hit.id for hit in bm25_hits} | {id_ for id_, _ in ann_hits}
     records_by_id = {r.id: r for r in fetch_records(list(candidate_ids))}
+    if where:
+        records_by_id = {
+            id_: record for id_, record in records_by_id.items() if _matches_where(record.metadata, where)
+        }
 
-    # ANN has no notion of namespace, so filter its hits post-hoc against
-    # the namespaces we actually fetched for. BM25 hits are already
-    # namespace-correct (store.py filters in SQL). A stale ANN id whose
+    # ANN has no notion of namespace or metadata, so filter its hits
+    # post-hoc against the namespaces/where-clause we actually fetched
+    # for. BM25 hits are already namespace-correct (store.py filters in
+    # SQL); the final Hits construction below drops any bm25 id that
+    # didn't survive the where-filter the same way. A stale ANN id whose
     # row was since deleted also gets dropped here for free.
     ann_hits = [
         (id_, sim)
@@ -178,7 +196,7 @@ def hybrid_search(
     hits.degraded = want_vectors and not ran_vector_stage
 
     if want_cache and query_vector is not None and not hits.degraded:
-        _write_query_cache(query_cache, cache_namespace, query, query_vector, k, hits)
+        _write_query_cache(query_cache, cache_scope, query, query_vector, k, hits)
 
     return hits
 
@@ -203,7 +221,7 @@ def _reciprocal_rank_fusion(
 
 def _check_query_cache(
     store: "Store",
-    cache_namespace: str,
+    cache_scope: str,
     query_vector: np.ndarray,
     k: int,
     threshold: float,
@@ -211,7 +229,7 @@ def _check_query_cache(
 ) -> Hits | None:
     store.purge_expired_query_cache(ttl_seconds, now=time.time())
     best_row, best_similarity = None, -1.0
-    for row in store.list_query_cache(cache_namespace):
+    for row in store.list_query_cache(cache_scope):
         cached_vector = np.frombuffer(row["query_vector"], dtype=np.float32)
         similarity = _cosine_similarity(query_vector, cached_vector)
         if similarity > best_similarity:
@@ -228,9 +246,9 @@ def _check_query_cache(
 
 
 def _write_query_cache(
-    store: "Store", cache_namespace: str, query: str, query_vector: np.ndarray, k: int, hits: Hits
+    store: "Store", cache_scope: str, query: str, query_vector: np.ndarray, k: int, hits: Hits
 ) -> None:
-    cache_key = hashlib.sha256(f"{cache_namespace}:{query}".encode("utf-8")).hexdigest()
+    cache_key = hashlib.sha256(f"{cache_scope}:{query}".encode("utf-8")).hexdigest()
     payload = json.dumps(
         {
             "k": k,
@@ -241,8 +259,12 @@ def _write_query_cache(
         }
     )
     store.set_query_cache(
-        cache_key, cache_namespace, query_vector.astype(np.float32).tobytes(), payload, created_at=time.time()
+        cache_key, cache_scope, query_vector.astype(np.float32).tobytes(), payload, created_at=time.time()
     )
+
+
+def _matches_where(metadata: dict[str, Any], where: dict[str, Any]) -> bool:
+    return all(metadata.get(key) == value for key, value in where.items())
 
 
 def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:

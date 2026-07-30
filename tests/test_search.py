@@ -13,9 +13,9 @@ def rig(tmp_path):
     embedder = CachingEmbedder(FakeEmbedder(dimension=16), store)
     ann_index = AnnIndex(dim=16)
 
-    def add_chunk(namespace: str, text: str) -> int:
+    def add_chunk(namespace: str, text: str, metadata: dict | None = None) -> int:
         doc_id = store.insert_document(namespace)
-        [chunk_id] = store.insert_chunks(doc_id, namespace, [text])
+        [chunk_id] = store.insert_chunks(doc_id, namespace, [text], [metadata or {}])
         vector = embedder.embed_one(text)
         ann_index.add([chunk_id], [vector])
         return chunk_id
@@ -132,3 +132,77 @@ def test_deleted_chunk_id_in_stale_ann_index_is_dropped(rig):
 
     hits = search(store, embedder, ann_index, "temporary content", ["researcher"])
     assert all(h.id != chunk_id for h in hits)
+
+
+def test_where_filters_to_matching_metadata(rig):
+    store, embedder, ann_index, add_chunk = rig
+    add_chunk("researcher", "deployment guide for docker", metadata={"source": "docs/deploy.md"})
+    add_chunk("researcher", "deployment guide for kubernetes", metadata={"source": "docs/k8s.md"})
+
+    hits = search(
+        store, embedder, ann_index, "deployment guide", ["researcher"], where={"source": "docs/deploy.md"}
+    )
+    assert len(hits) == 1
+    assert hits[0].metadata["source"] == "docs/deploy.md"
+
+
+def test_where_with_no_matches_returns_empty(rig):
+    store, embedder, ann_index, add_chunk = rig
+    add_chunk("researcher", "deployment guide", metadata={"source": "docs/deploy.md"})
+
+    hits = search(
+        store, embedder, ann_index, "deployment guide", ["researcher"], where={"source": "nonexistent.md"}
+    )
+    assert len(hits) == 0
+
+
+def test_where_requires_all_keys_to_match(rig):
+    store, embedder, ann_index, add_chunk = rig
+    add_chunk("researcher", "release notes", metadata={"source": "docs/a.md", "category": "release"})
+    add_chunk("researcher", "release notes", metadata={"source": "docs/a.md", "category": "internal"})
+
+    hits = search(
+        store,
+        embedder,
+        ann_index,
+        "release notes",
+        ["researcher"],
+        where={"source": "docs/a.md", "category": "release"},
+    )
+    assert len(hits) == 1
+    assert hits[0].metadata["category"] == "release"
+
+
+def test_cached_result_not_reused_across_different_where_filters(rig):
+    store, embedder, ann_index, add_chunk = rig
+    add_chunk("researcher", "quarterly report content", metadata={"source": "a.md"})
+
+    store_module_kwargs = dict(query_cache=store)
+    unfiltered = hybrid_search(
+        query="quarterly report",
+        namespaces=["researcher"],
+        k=5,
+        fts_search=store.search_chunks_fts,
+        fetch_records=store.get_chunks,
+        ann_index=ann_index,
+        embedder=embedder,
+        **store_module_kwargs,
+    )
+    assert unfiltered.from_cache is False
+    assert len(unfiltered) == 1
+
+    # Same query, but now filtered to a source that doesn't match — must
+    # not incorrectly return the cached unfiltered result.
+    filtered = hybrid_search(
+        query="quarterly report",
+        namespaces=["researcher"],
+        k=5,
+        fts_search=store.search_chunks_fts,
+        fetch_records=store.get_chunks,
+        ann_index=ann_index,
+        embedder=embedder,
+        where={"source": "nonexistent.md"},
+        **store_module_kwargs,
+    )
+    assert filtered.from_cache is False
+    assert len(filtered) == 0
