@@ -134,6 +134,11 @@ class ChunkRecord:
     text: str
     metadata: dict[str, Any]
     chunk_index: int
+    # A chunk's own "created" timestamp is always its parent document's
+    # added_at — chunks are never independently re-added after their
+    # document is ingested, so there's no schema-level timestamp on
+    # `chunks` itself; get_chunks() joins to documents.added_at instead.
+    added_at: str
 
 
 @dataclass
@@ -274,7 +279,10 @@ class Store:
             return []
         placeholders = ",".join("?" * len(ids))
         rows = self.conn.execute(
-            f"SELECT * FROM chunks WHERE id IN ({placeholders})", ids
+            f"SELECT chunks.*, documents.added_at AS added_at "
+            f"FROM chunks JOIN documents ON documents.id = chunks.document_id "
+            f"WHERE chunks.id IN ({placeholders})",
+            ids,
         ).fetchall()
         by_id = {row["id"]: _row_to_chunk(row) for row in rows}
         return [by_id[i] for i in ids if i in by_id]
@@ -501,6 +509,7 @@ def _row_to_chunk(row: sqlite3.Row) -> ChunkRecord:
         text=row["text"],
         metadata=json.loads(row["metadata"]),
         chunk_index=row["chunk_index"],
+        added_at=row["added_at"],
     )
 
 

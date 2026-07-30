@@ -29,11 +29,19 @@ from ._engine import (
     save_ann_index,
 )
 from .ann import AnnIndex
-from .chunk import DEFAULT_CHUNK_OVERLAP, DEFAULT_CHUNK_SIZE, split_markdown, split_python, split_text
+from .chunk import (
+    DEFAULT_CHUNK_OVERLAP,
+    DEFAULT_CHUNK_SIZE,
+    split_json,
+    split_markdown,
+    split_python,
+    split_rst,
+    split_text,
+)
 from .embed import Embedder
 from .policy import Policy
 from .rerank import CrossEncoderReranker
-from .search import Hits, hybrid_search
+from .search import DEFAULT_RECENCY_HALF_LIFE_SECONDS, Hits, hybrid_search
 from .store import Store
 from .tools import ToolSpec, index_search_tool
 
@@ -49,8 +57,16 @@ _SPLITTERS: dict[str, Splitter] = {
     "text": split_text,
     "markdown": split_markdown,
     "python": split_python,
+    "json": split_json,
+    "rst": split_rst,
 }
-_EXTENSION_SPLITTERS: dict[str, str] = {".md": "markdown", ".markdown": "markdown", ".py": "python"}
+_EXTENSION_SPLITTERS: dict[str, str] = {
+    ".md": "markdown",
+    ".markdown": "markdown",
+    ".py": "python",
+    ".json": "json",
+    ".rst": "rst",
+}
 
 
 def _resolve_splitter(splitter: "str | Splitter") -> Splitter:
@@ -280,6 +296,8 @@ class Index:
         use_vectors: bool = True,
         budget_ms: float | None = None,
         min_similarity: float | None = None,
+        recency_weight: float = 0.0,
+        recency_half_life_seconds: float = DEFAULT_RECENCY_HALF_LIFE_SECONDS,
         rerank: bool = False,
     ) -> Hits:
         """Hybrid search over indexed chunks. Returns Hits — hits[0].text, hits[0].score, hits.timings.
@@ -297,6 +315,14 @@ class Index:
         `min_similarity` drops hits below that raw cosine similarity
         (requires `use_vectors=True`) — a real confidence gate, unlike
         thresholding on `hit.score` itself.
+
+        `recency_weight` (0.0, off, by default) blends a recency bonus
+        into ranking so a freshly-added chunk can outrank an equally
+        relevant older one — `recency_half_life_seconds` controls how
+        fast that bonus decays (default: a week). A chunk's "created"
+        time is its document's `add_text()`/`add_files()` ingestion time
+        (chunks aren't independently re-added later, so there's no
+        separate per-chunk timestamp to track).
 
         `rerank=True` re-scores the candidate pool with a local
         cross-encoder (`rerank.CrossEncoderReranker`, lazily loaded on
@@ -320,6 +346,9 @@ class Index:
             budget_ms=budget_ms,
             query_cache=self._store,
             min_similarity=min_similarity,
+            recency_weight=recency_weight,
+            recency_half_life_seconds=recency_half_life_seconds,
+            record_timestamp=(lambda record: record.added_at) if recency_weight else None,
             reranker=self._get_reranker() if rerank else None,
         )
 

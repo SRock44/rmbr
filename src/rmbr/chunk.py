@@ -1,18 +1,25 @@
 """Text splitters for turning documents into search-sized chunks.
 
-Three entry points: ``split_text`` for plain text, ``split_markdown`` for
-markdown (splits on headers first so a chunk never silently straddles two
-unrelated sections), ``split_python`` for Python source (splits on
-top-level function/class boundaries using the standard library's ``ast``
-module, so a chunk never cuts a function in half). All three return a
-plain list of strings — chunking has no opinion on storage or embeddings,
-it just cuts text into pieces of a reasonable size.
+Five entry points, all returning a plain list of strings (chunking has no
+opinion on storage or embeddings, it just cuts text into pieces of a
+reasonable size): ``split_text`` for plain text, ``split_markdown`` for
+markdown (splits on headers first), ``split_python`` for Python source
+(splits on top-level function/class boundaries via the standard library's
+``ast`` module), ``split_json`` for JSON (splits on top-level object keys
+or array elements via the standard library's ``json`` module), and
+``split_rst`` for reStructuredText (splits on section headings, detected
+by the underline-punctuation heuristic — see its docstring for what that
+does and doesn't cover). Every structure-aware splitter falls back to
+``split_text`` on input it can't parse rather than raising — chunking
+should never be the thing that breaks ingestion.
 """
 
 from __future__ import annotations
 
 import ast
+import json
 import re
+import string
 
 DEFAULT_CHUNK_SIZE = 800
 DEFAULT_CHUNK_OVERLAP = 150
@@ -125,6 +132,111 @@ def split_python(
         for piece in split_text(source, chunk_size, chunk_overlap):
             chunks.append(f"{breadcrumb}\n{piece}" if breadcrumb else piece)
     return chunks
+
+
+def split_json(
+    text: str,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+    chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
+) -> list[str]:
+    """Split JSON on top-level object keys or array elements.
+
+    Parses with the standard library's ``json`` module — no parser
+    dependency. A top-level object becomes one chunk per key (prefixed
+    with a ``"# 'key'"`` breadcrumb); a top-level array becomes one chunk
+    per element (prefixed ``"# [i]"``); either is further split by
+    ``split_text`` only if a single element alone exceeds ``chunk_size``.
+
+    Each chunk is the element re-serialized (``json.dumps(..., indent=2,
+    ensure_ascii=False)``), not a literal slice of the original text — so
+    whitespace/formatting can differ from the source file, but the actual
+    data doesn't. That tradeoff is deliberate: finding exact byte offsets
+    for arbitrary nested JSON would need a custom parser, and re-indented
+    JSON is more readable in a chunk returned to an LLM anyway.
+
+    Falls back to ``split_text`` on invalid JSON, or JSON whose top level
+    is a bare scalar/empty container with nothing structural to split at.
+    """
+    text = text.strip()
+    if not text:
+        return []
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return split_text(text, chunk_size, chunk_overlap)
+
+    if isinstance(data, dict) and data:
+        segments = [(f"# {key!r}", json.dumps({key: value}, indent=2, ensure_ascii=False)) for key, value in data.items()]
+    elif isinstance(data, list) and data:
+        segments = [(f"# [{i}]", json.dumps(item, indent=2, ensure_ascii=False)) for i, item in enumerate(data)]
+    else:
+        return split_text(text, chunk_size, chunk_overlap)
+
+    chunks = []
+    for breadcrumb, source in segments:
+        for piece in split_text(source, chunk_size, chunk_overlap):
+            chunks.append(f"{breadcrumb}\n{piece}")
+    return chunks
+
+
+_RST_UNDERLINE_CHARS = set(string.punctuation)
+
+
+def split_rst(
+    text: str,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+    chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
+) -> list[str]:
+    """Split reStructuredText on section headings.
+
+    Detects a heading as a non-blank line immediately followed by a line
+    of a single repeated punctuation character at least as long as the
+    heading text — the common underline-only heading style (``Title`` /
+    ``=====``). This is a heuristic, not a full RST parser: it doesn't
+    handle overline+underline headings (a punctuation line both above and
+    below the title, RST's other valid style) or transitions (a lone
+    punctuation-line divider not attached to any heading, which this
+    would ignore correctly anyway since there's no heading text above it
+    to pair with). Falls back to ``split_text`` whenever no heading is
+    detected — including on any text that just isn't RST.
+
+    Each section (heading line plus everything until the next heading) is
+    further split by ``split_text`` only if it alone exceeds
+    ``chunk_size``; unlike the markdown/Python splitters, sections aren't
+    given a synthetic breadcrumb prefix since the heading line itself is
+    already the first line of its chunk.
+    """
+    text = text.strip()
+    if not text:
+        return []
+
+    lines = text.splitlines()
+    heading_starts = [i for i in range(len(lines) - 1) if _is_rst_heading(lines[i], lines[i + 1])]
+    if not heading_starts:
+        return split_text(text, chunk_size, chunk_overlap)
+
+    boundaries = heading_starts + [len(lines)]
+    chunks: list[str] = []
+    if boundaries[0] > 0:
+        preamble = "\n".join(lines[: boundaries[0]]).strip()
+        if preamble:
+            chunks.extend(split_text(preamble, chunk_size, chunk_overlap))
+
+    for start, end in zip(boundaries, boundaries[1:]):
+        section = "\n".join(lines[start:end]).strip()
+        if section:
+            chunks.extend(split_text(section, chunk_size, chunk_overlap))
+
+    return chunks
+
+
+def _is_rst_heading(heading_line: str, underline_line: str) -> bool:
+    heading = heading_line.strip()
+    underline = underline_line.strip()
+    if not heading or not underline or len(underline) < len(heading):
+        return False
+    chars = set(underline)
+    return len(chars) == 1 and chars <= _RST_UNDERLINE_CHARS
 
 
 def _split_recursive(text: str, chunk_size: int) -> list[str]:

@@ -60,11 +60,39 @@ def hit_to_dict(hit: Any) -> dict[str, Any]:
     }
 
 
+# Shared by index_search_tool() and memory_tools()'s recall tool - both
+# ultimately call hybrid_search() with the same knobs. `where`'s schema is
+# deliberately permissive (no fixed `properties`) since its shape is
+# dynamic - either plain equality values or {"$gt": ...}-style operator
+# dicts - describing that fully as JSON Schema isn't worth the complexity
+# a tool-calling model needs to reason about; the description carries the
+# actual contract instead.
 _SEARCH_PARAMETERS = {
     "type": "object",
     "properties": {
         "query": {"type": "string", "description": "The search query"},
         "k": {"type": "integer", "description": "Number of results to return", "default": 5},
+        "where": {
+            "type": "object",
+            "description": (
+                'Filter by metadata. A plain value is equality (e.g. {"category": "docs"}); '
+                'an operator dict narrows further (e.g. {"price": {"$gt": 10}}) - '
+                "$eq/$ne/$gt/$gte/$lt/$lte/$in/$nin are supported. Omit for no filtering."
+            ),
+            "additionalProperties": True,
+        },
+        "min_similarity": {
+            "type": "number",
+            "description": (
+                "Drop results below this raw cosine similarity (0-1) - a real confidence "
+                "gate, unlike the returned score itself. Omit for no filtering."
+            ),
+        },
+        "rerank": {
+            "type": "boolean",
+            "description": "Re-score results with a local cross-encoder for higher precision at extra latency.",
+            "default": False,
+        },
     },
     "required": ["query"],
 }
@@ -79,8 +107,15 @@ _REMEMBER_PARAMETERS = {
 def index_search_tool(index: Any, *, name: str = "search") -> ToolSpec:
     """A `ToolSpec` for `index.search()`. See `Index.as_tool()`."""
 
-    def handler(query: str, k: int = 5) -> list[dict[str, Any]]:
-        return [hit_to_dict(h) for h in index.search(query, k=k)]
+    def handler(
+        query: str,
+        k: int = 5,
+        where: dict[str, Any] | None = None,
+        min_similarity: float | None = None,
+        rerank: bool = False,
+    ) -> list[dict[str, Any]]:
+        hits = index.search(query, k=k, where=where, min_similarity=min_similarity, rerank=rerank)
+        return [hit_to_dict(h) for h in hits]
 
     return ToolSpec(
         name=name,
@@ -93,8 +128,15 @@ def index_search_tool(index: Any, *, name: str = "search") -> ToolSpec:
 def memory_tools(memory: Any, *, read_only: bool = False) -> list[ToolSpec]:
     """`ToolSpec`s for `memory.recall()` (and `memory.remember()`, unless `read_only`). See `Memory.as_tools()`."""
 
-    def recall_handler(query: str, k: int = 5) -> list[dict[str, Any]]:
-        return [hit_to_dict(h) for h in memory.recall(query, k=k)]
+    def recall_handler(
+        query: str,
+        k: int = 5,
+        where: dict[str, Any] | None = None,
+        min_similarity: float | None = None,
+        rerank: bool = False,
+    ) -> list[dict[str, Any]]:
+        hits = memory.recall(query, k=k, where=where, min_similarity=min_similarity, rerank=rerank)
+        return [hit_to_dict(h) for h in hits]
 
     tools = [
         ToolSpec(

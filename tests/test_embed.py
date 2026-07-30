@@ -129,3 +129,70 @@ def test_openai_embedder_empty_input_skips_the_api_call(monkeypatch):
     embedder = OpenAIEmbedder()
     assert embedder.embed([]) == []
     mock_client.embeddings.create.assert_not_called()
+
+
+def test_voyage_embedder_embeds_in_request_order(monkeypatch):
+    pytest.importorskip("voyageai")  # optional extra - pip install rmbr[voyage]
+    from rmbr.embed import VoyageEmbedder
+
+    fake_response = MagicMock()
+    fake_response.embeddings = [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]
+    mock_client = MagicMock()
+    mock_client.embed.return_value = fake_response
+    monkeypatch.setattr("voyageai.Client", lambda *args, **kwargs: mock_client)
+
+    embedder = VoyageEmbedder(model_name="voyage-3")
+    vectors = embedder.embed(["first", "second"])
+
+    mock_client.embed.assert_called_once_with(["first", "second"], model="voyage-3", input_type=None)
+    assert len(vectors) == 2
+    assert np.allclose(vectors[0], [0.1, 0.2, 0.3])
+    assert np.allclose(vectors[1], [0.4, 0.5, 0.6])
+
+
+def test_voyage_embedder_empty_input_skips_the_api_call(monkeypatch):
+    pytest.importorskip("voyageai")  # optional extra - pip install rmbr[voyage]
+    from rmbr.embed import VoyageEmbedder
+
+    mock_client = MagicMock()
+    monkeypatch.setattr("voyageai.Client", lambda *args, **kwargs: mock_client)
+
+    embedder = VoyageEmbedder()
+    assert embedder.embed([]) == []
+    mock_client.embed.assert_not_called()
+
+
+def test_cohere_embedder_embeds_float_vectors(monkeypatch):
+    pytest.importorskip("cohere")  # optional extra - pip install rmbr[cohere]
+    from rmbr.embed import CohereEmbedder
+
+    fake_response = MagicMock()
+    fake_response.embeddings.float_ = [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]
+    mock_client = MagicMock()
+    mock_client.embed.return_value = fake_response
+    monkeypatch.setattr("cohere.ClientV2", lambda *args, **kwargs: mock_client)
+
+    embedder = CohereEmbedder(model_name="embed-english-v3.0")
+    vectors = embedder.embed(["first", "second"])
+
+    mock_client.embed.assert_called_once_with(
+        model="embed-english-v3.0",
+        texts=["first", "second"],
+        input_type="search_document",
+        embedding_types=["float"],
+    )
+    assert len(vectors) == 2
+    assert np.allclose(vectors[0], [0.1, 0.2, 0.3])
+    assert np.allclose(vectors[1], [0.4, 0.5, 0.6])
+
+
+def test_cohere_embedder_empty_input_skips_the_api_call(monkeypatch):
+    pytest.importorskip("cohere")  # optional extra - pip install rmbr[cohere]
+    from rmbr.embed import CohereEmbedder
+
+    mock_client = MagicMock()
+    monkeypatch.setattr("cohere.ClientV2", lambda *args, **kwargs: mock_client)
+
+    embedder = CohereEmbedder()
+    assert embedder.embed([]) == []
+    mock_client.embed.assert_not_called()

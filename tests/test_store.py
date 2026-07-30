@@ -22,6 +22,15 @@ def test_insert_and_fetch_document_and_chunks(store):
     assert chunks[1].chunk_index == 1
 
 
+def test_get_chunks_carries_parent_document_added_at(store):
+    doc_id = store.insert_document("researcher")
+    document = store.get_document(doc_id)
+    [chunk_id] = store.insert_chunks(doc_id, "researcher", ["a chunk"])
+
+    [chunk] = store.get_chunks([chunk_id])
+    assert chunk.added_at == document.added_at
+
+
 def test_delete_document_cascades_to_chunks(store):
     doc_id = store.insert_document("researcher")
     chunk_ids = store.insert_chunks(doc_id, "researcher", ["a", "b"])

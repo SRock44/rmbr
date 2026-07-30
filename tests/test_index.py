@@ -386,3 +386,18 @@ def test_search_rerank_uses_cross_encoder_score(tmp_path):
 
     assert hits[0].text == "the strong match"
     assert hits[0].score == 1.0
+
+
+def test_search_recency_weight_favors_newer_chunk(tmp_path):
+    db = tmp_path / "agents.db"
+    idx = make_index(db)
+    old_doc_id = idx.add_text("status update")
+    new_doc_id = idx.add_text("status update")
+
+    old_ts = "2000-01-01T00:00:00+00:00"
+    idx._store.conn.execute("UPDATE documents SET added_at = ? WHERE id = ?", (old_ts, old_doc_id))
+    idx._store.conn.commit()
+
+    hits = idx.search("status update", recency_weight=1.0, recency_half_life_seconds=3600)
+    newer_chunk_ids = set(idx._store.get_chunk_ids_for_document(new_doc_id))
+    assert hits[0].id in newer_chunk_ids
