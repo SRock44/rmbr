@@ -16,6 +16,7 @@ path twice.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from ._engine import (
@@ -50,6 +51,7 @@ class Memory:
         self._store = Store(path)
         self._embedder = make_embedder(embedder, self._store)
         self._ann = load_ann_index(self._store, _COLLECTION)
+        self._alock = asyncio.Lock()
 
     def remember(
         self,
@@ -146,3 +148,24 @@ class Memory:
 
     def __exit__(self, *exc_info: object) -> None:
         self.close()
+
+    # -- async surface -----------------------------------------------------
+    #
+    # Thin wrappers around asyncio.to_thread, guarded by a per-instance
+    # lock — see Index's async surface in index.py for the full rationale
+    # (usearch isn't documented as safe for concurrent mutation from
+    # multiple threads, so every async call on one Memory instance is
+    # serialized rather than risking that). Open separate Memory instances
+    # for true concurrent access.
+
+    async def aremember(self, text: str, **kwargs: Any) -> int:
+        async with self._alock:
+            return await asyncio.to_thread(self.remember, text, **kwargs)
+
+    async def arecall(self, query: str, **kwargs: Any) -> Hits:
+        async with self._alock:
+            return await asyncio.to_thread(self.recall, query, **kwargs)
+
+    async def aforget(self, memory_id: int) -> None:
+        async with self._alock:
+            return await asyncio.to_thread(self.forget, memory_id)

@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from rmbr.embed import FakeEmbedder
@@ -117,3 +119,69 @@ def test_recall_where_filters_by_metadata(tmp_path):
     hits = mem.recall("user prefers dark mode", where={"category": "preference"})
     assert len(hits) == 1
     assert hits[0].metadata["category"] == "preference"
+
+
+def test_async_aremember_and_arecall(tmp_path):
+    db = tmp_path / "agents.db"
+    mem = make_memory(db, "researcher")
+
+    async def run():
+        await mem.aremember("user prefers dark mode and short answers")
+        return await mem.arecall("user preferences")
+
+    hits = asyncio.run(run())
+    assert len(hits) == 1
+
+
+def test_async_aforget(tmp_path):
+    db = tmp_path / "agents.db"
+    mem = make_memory(db, "researcher")
+
+    async def run():
+        memory_id = await mem.aremember("temporary note")
+        await mem.aforget(memory_id)
+        return await mem.arecall("temporary note")
+
+    hits = asyncio.run(run())
+    assert len(hits) == 0
+
+
+def test_async_concurrent_remember_calls_do_not_error(tmp_path):
+    db = tmp_path / "agents.db"
+    mem = make_memory(db, "researcher")
+
+    async def run():
+        await asyncio.gather(
+            mem.aremember("first concurrent memory"),
+            mem.aremember("second concurrent memory"),
+            mem.aremember("third concurrent memory"),
+        )
+        return mem.list()
+
+    memories = asyncio.run(run())
+    assert len(memories) == 3
+
+
+def test_async_gather_across_namespaces_for_supervisor_pattern(tmp_path):
+    """The concrete multi-agent story: a supervisor reading several
+    granted namespaces concurrently via asyncio.gather, not sequentially."""
+    from rmbr.policy import Policy
+
+    db = tmp_path / "agents.db"
+    make_memory(db, "coder").remember("coder note about the api")
+    make_memory(db, "researcher").remember("researcher note about the api")
+
+    policy = Policy()
+    policy.allow("supervisor", read="*")
+    supervisor = Memory(str(db), "supervisor", embedder=FakeEmbedder(dimension=16), policy=policy)
+
+    async def run():
+        coder_hits, researcher_hits = await asyncio.gather(
+            supervisor.arecall("api", namespaces="coder"),
+            supervisor.arecall("api", namespaces="researcher"),
+        )
+        return coder_hits, researcher_hits
+
+    coder_hits, researcher_hits = asyncio.run(run())
+    assert len(coder_hits) == 1
+    assert len(researcher_hits) == 1
