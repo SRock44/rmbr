@@ -106,3 +106,14 @@ def test_context_manager_closes_store(tmp_path):
         mem.remember("a note")
     with pytest.raises(Exception):
         mem._store.conn.execute("SELECT 1")
+
+
+def test_recall_where_filters_by_metadata(tmp_path):
+    db = tmp_path / "agents.db"
+    mem = make_memory(db, "researcher")
+    mem.remember("user prefers dark mode", metadata={"category": "preference"})
+    mem.remember("user prefers dark mode too", metadata={"category": "observation"})
+
+    hits = mem.recall("user prefers dark mode", where={"category": "preference"})
+    assert len(hits) == 1
+    assert hits[0].metadata["category"] == "preference"

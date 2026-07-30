@@ -77,6 +77,7 @@ class Memory:
         *,
         k: int = 5,
         namespaces: str | list[str] | None = None,
+        where: dict[str, Any] | None = None,
         use_bm25: bool = True,
         use_vectors: bool = True,
         budget_ms: float | None = None,
@@ -86,6 +87,9 @@ class Memory:
         Hybrid (both signals, the default) is what you want for real
         queries. Set `use_bm25=False` for pure semantic search, or
         `use_vectors=False` for pure keyword search.
+
+        `where` filters to memories whose metadata matches every
+        key/value given — equality only in v0.1, no operators.
         """
         readable = resolve_readable_namespaces(
             self.policy, self.namespace, namespaces, self._store.list_memory_namespaces
@@ -100,6 +104,7 @@ class Memory:
             embedder=self._embedder,
             use_bm25=use_bm25,
             use_vectors=use_vectors,
+            where=where,
             budget_ms=budget_ms,
             query_cache=self._store,
         )
