@@ -24,7 +24,7 @@ No number appears in the README that isn't produced by `bench/run.py` — reprod
 
 ## Architecture
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design. Summary: one SQLite file per index (stdlib, zero added deps) holding documents, chunks, memories, caches, and the serialized HNSW blob; hnswlib in RAM for vectors; FTS5 for BM25; hybrid search via reciprocal rank fusion; local ONNX embeddings by default with a content-hash cache; deny-by-default `Policy` layer over namespaces; namespace-pinned MCP serving.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design. Summary: one SQLite file per index (stdlib, zero added deps) holding documents, chunks, memories, caches, and the serialized HNSW blob; `usearch` in RAM for vectors (switched from the originally-planned `hnswlib`, which has no Windows wheel for Python 3.13 — see ARCHITECTURE.md); FTS5 for BM25; hybrid search via reciprocal rank fusion; local ONNX embeddings by default with a content-hash cache; deny-by-default `Policy` layer over namespaces; namespace-pinned MCP serving.
 
 ## Package layout
 
@@ -73,4 +73,4 @@ rmbr/
 - Memory: persistence across processes; namespace isolation; policy grant/deny paths
 - MCP smoke test: `python -m rmbr` driven by an MCP client script; verify namespace pinning
 - Bench: p50/p95 latency, ingestion throughput, recall@k vs Chroma + LanceDB
-- Clean-venv wheels-only install on Windows (verify hnswlib wheels; else switch to usearch/voyager)
+- Clean-venv wheels-only install on Windows, enforced automatically by CI's `--only-binary :all:` step (this is how the hnswlib→usearch switch above got caught)

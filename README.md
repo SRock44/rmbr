@@ -4,7 +4,7 @@
 
 `rmbr` ("remember", vowels deleted) is an embedded, local-first **memory + retrieval engine for AI agents and LLM apps** — what SQLite is to Postgres, rmbr aims to be to hosted memory services.
 
-> ⚠️ **Status: pre-release, under active development.** The design is finalized (see [docs/PLAN.md](docs/PLAN.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)); implementation of v0.1 is in progress. Nothing below is installable yet.
+> ⚠️ **Status: pre-release.** `Memory`, `Index`, `Policy`, and MCP support (below) are implemented and tested in this repo — see [docs/PLAN.md](docs/PLAN.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design. Not yet published to PyPI as a working release (the `rmbr` package there today is a name-holding stub) — watch this repo for the tagged v0.1.0 release.
 
 ## Why
 
@@ -16,7 +16,7 @@ Agents need two things constantly: **memory** (remember things across sessions) 
 - **No API key.** Embeddings run locally via a small ONNX model by default. Nothing phones home, ever. Cloud embedding providers (OpenAI/Voyage/Cohere) are strictly opt-in.
 - **Works with every LLM.** rmbr never calls an LLM — it returns relevant text, you feed it to Claude, GPT, Gemini, or a local model. Zero model lock-in by construction.
 
-## Planned API (v0.1)
+## API (v0.1)
 
 ```python
 from rmbr import Memory, Index, Policy, serve_mcp
@@ -43,6 +43,20 @@ serve_mcp("agents.db", namespace="coder", read_only=True)
 
 Library-only by design — no CLI to learn. (`python -m rmbr` exists solely so MCP clients can launch the server.)
 
+### Try it from source
+
+Not on PyPI as a working release yet, but every line above runs today against this repo:
+
+```bash
+git clone https://github.com/SRock44/rmbr.git
+cd rmbr
+python -m venv .venv && source .venv/bin/activate   # .venv\Scripts\activate on Windows
+pip install --only-binary :all: -e .
+pytest tests/    # 93 tests, no network or API key required
+```
+
+The default embedder (`fastembed`, a local ONNX model) downloads its model weights on first use. Every test in `tests/` instead uses `rmbr.embed.FakeEmbedder` — a deterministic, dependency-free embedder — so the suite runs fully offline; you can inject the same `FakeEmbedder` into your own tests via `Memory(..., embedder=FakeEmbedder())` / `Index(..., embedder=FakeEmbedder())`.
+
 ## Multi-agent isolation, honestly stated
 
 - **Namespaces** keep agents' memories separate and are enforced on every call — but they are *organizational*, not cryptographic. Any code with access to the file can open the file. That's true of every embedded database; we say it out loud.
@@ -51,12 +65,15 @@ Library-only by design — no CLI to learn. (`python -m rmbr` exists solely so M
 
 ## Performance claims policy
 
-**This README will never contain a performance number that isn't produced by `bench/run.py`** — reproducible by anyone, recall pinned, against named competitors on identical hardware. Until those runs are published, we make no speed claims, only design commitments: local embeddings (no network round trip), content-hash embedding cache (never embed the same text twice), semantic query cache, and in-RAM HNSW vector search.
+**This README will never contain a performance number that isn't produced by `bench/run.py`** — reproducible by anyone, recall pinned, against named competitors (Chroma, LanceDB) on identical hardware. The harness exists (`bench/`) and runs end-to-end today, but a number from a laptop is directional, not a claim — publishable numbers come from a run on the project's pinned Linux benchmark machine, not yet done. Until then: no speed claims, only design commitments — local embeddings (no network round trip), a content-hash embedding cache (never embed the same text twice), a semantic query cache, and in-RAM HNSW-family vector search (`usearch`).
+
+Want to run it yourself? `pip install -e ".[bench]" && python bench/run.py` — every engine is fed identical precomputed vectors so the comparison is apples-to-apples (see `bench/run.py`'s module docstring for the full methodology).
 
 ## Roadmap
 
-- **v0.1** — `Memory` + `Policy` + `Index` (hybrid search), embedding + semantic caches, MCP support, 3-OS CI (Linux/Windows/macOS), benchmark harness vs Chroma and LanceDB
-- **Later** — async API surface expansion, more chunkers, additional embedding providers
+- **v0.1 (done in this repo, not yet released to PyPI)** — `Memory` + `Policy` + `Index` (hybrid BM25 + vector search), embedding + semantic query caches, MCP support (namespace-pinned), 3-OS CI (Linux/Windows/macOS), benchmark harness vs Chroma and LanceDB
+- **Before the v0.1.0 tag** — publish real benchmark numbers from the pinned Linux machine, set up PyPI trusted publishing
+- **Later** — async API surface, more chunkers, additional embedding providers
 
 ## License
 

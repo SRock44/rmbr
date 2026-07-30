@@ -38,8 +38,7 @@ One `.db` file per index. Everything — documents, chunks, memories, caches, an
 - **Embedding cache:** SHA-256(content) → vector, stored in SQLite. The same text is never embedded twice, across sessions and processes.
 
 ### ann.py — vector search
-- HNSW via `hnswlib`, held in RAM, serialized into the SQLite file on save (preserves the one-file promise). Wheels on all 3 OSes are a hard requirement — if hnswlib wheels are unavailable for a target platform/Python, fall back to `usearch` or `voyager`.
-- Brute-force numpy path below ~10k vectors, where index overhead isn't worth it.
+- HNSW via `usearch`, held in RAM, serialized into the SQLite file on save (preserves the one-file promise). Originally planned around `hnswlib`, but hnswlib ships no prebuilt wheel for Python 3.13 on Windows — building it from source would need a C++ toolchain on every machine that installs rmbr, which fails the "pip install, no fuss" promise. usearch has wheels for all 3 OSes and the same core algorithm; CI's wheels-only install step (`--only-binary :all:`) exists specifically to catch a regression like this early.
 
 ### search.py — hybrid retrieval
 - BM25 (FTS5) + vector ANN, merged by reciprocal rank fusion. Hybrid is the default.
