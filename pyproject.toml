@@ -32,6 +32,8 @@ dependencies = [
 [project.optional-dependencies]
 bench = ["chromadb", "lancedb"]
 openai = ["openai>=1.0"]
+langchain = ["langchain-core>=0.3"]
+llamaindex = ["llama-index-core>=0.11"]
 
 [project.scripts]
 rmbr = "rmbr.__main__:main"

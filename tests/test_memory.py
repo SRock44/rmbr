@@ -305,3 +305,68 @@ def test_recall_rerank_uses_cross_encoder_score(tmp_path):
 
     assert hits[0].text == "the strong match"
     assert hits[0].score == 1.0
+
+
+def test_remember_turn_stores_role_and_session_in_metadata_not_text(tmp_path):
+    db = tmp_path / "agents.db"
+    mem = make_memory(db, "assistant")
+    memory_id = mem.remember_turn("user", "I prefer dark mode", session_id="conv-1")
+
+    memories = mem.list()
+    assert len(memories) == 1
+    assert memories[0].id == memory_id
+    assert memories[0].text == "I prefer dark mode"  # not prefixed with "user: "
+    assert memories[0].metadata == {"role": "user", "session_id": "conv-1"}
+
+
+def test_remember_turn_without_session_id_omits_it_from_metadata(tmp_path):
+    db = tmp_path / "agents.db"
+    mem = make_memory(db, "assistant")
+    mem.remember_turn("assistant", "sure, I can help with that")
+
+    assert mem.list()[0].metadata == {"role": "assistant"}
+
+
+def test_remember_turn_merges_caller_metadata(tmp_path):
+    db = tmp_path / "agents.db"
+    mem = make_memory(db, "assistant")
+    mem.remember_turn("user", "note", session_id="conv-1", metadata={"topic": "settings"})
+
+    assert mem.list()[0].metadata == {"role": "user", "session_id": "conv-1", "topic": "settings"}
+
+
+def test_list_where_filters_by_session_for_conversation_replay(tmp_path):
+    db = tmp_path / "agents.db"
+    mem = make_memory(db, "assistant")
+    mem.remember_turn("user", "message in conv 1", session_id="conv-1")
+    mem.remember_turn("assistant", "reply in conv 1", session_id="conv-1")
+    mem.remember_turn("user", "message in conv 2", session_id="conv-2")
+
+    conv1 = mem.list(where={"session_id": "conv-1"})
+    assert len(conv1) == 2
+    assert all(m.metadata["session_id"] == "conv-1" for m in conv1)
+    # most-recent-first, same ordering guarantee as plain list()
+    assert conv1[0].text == "reply in conv 1"
+
+
+def test_list_where_respects_limit_after_filtering(tmp_path):
+    db = tmp_path / "agents.db"
+    mem = make_memory(db, "assistant")
+    for i in range(3):
+        mem.remember_turn("user", f"message {i}", session_id="conv-1")
+    mem.remember_turn("user", "other session", session_id="conv-2")
+
+    limited = mem.list(where={"session_id": "conv-1"}, limit=2)
+    assert len(limited) == 2
+
+
+def test_async_aremember_turn(tmp_path):
+    db = tmp_path / "agents.db"
+    mem = make_memory(db, "assistant")
+
+    async def run():
+        return await mem.aremember_turn("user", "async note", session_id="conv-async")
+
+    memory_id = asyncio.run(run())
+    assert mem.list()[0].id == memory_id
+    assert mem.list()[0].metadata["session_id"] == "conv-async"

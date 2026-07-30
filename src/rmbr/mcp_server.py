@@ -23,7 +23,7 @@ from .embed import Embedder
 from .index import Index
 from .memory import Memory
 from .policy import Policy
-from .search import Hit
+from .tools import hit_to_dict
 
 
 def serve_mcp(
@@ -73,12 +73,12 @@ def build_mcp_server(
     @server.tool()
     def search(query: str, k: int = 5) -> list[dict[str, Any]]:
         """Search this agent's indexed documents by keyword and meaning."""
-        return [_hit_to_dict(h) for h in idx.search(query, k=k)]
+        return [hit_to_dict(h) for h in idx.search(query, k=k)]
 
     @server.tool()
     def recall(query: str, k: int = 5) -> list[dict[str, Any]]:
         """Recall this agent's own remembered notes by keyword and meaning."""
-        return [_hit_to_dict(h) for h in mem.recall(query, k=k)]
+        return [hit_to_dict(h) for h in mem.recall(query, k=k)]
 
     if not read_only:
 
@@ -88,14 +88,3 @@ def build_mcp_server(
             return mem.remember(text)
 
     return server
-
-
-def _hit_to_dict(hit: Hit) -> dict[str, Any]:
-    return {
-        "id": hit.id,
-        "text": hit.text,
-        "score": hit.score,
-        "metadata": hit.metadata,
-        "bm25_score": hit.bm25_score,
-        "vector_score": hit.vector_score,
-    }

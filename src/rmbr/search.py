@@ -226,7 +226,7 @@ def hybrid_search(
     records_by_id = {r.id: r for r in fetch_records(list(candidate_ids))}
     if where:
         records_by_id = {
-            id_: record for id_, record in records_by_id.items() if _matches_where(record.metadata, where)
+            id_: record for id_, record in records_by_id.items() if matches_where(record.metadata, where)
         }
 
     # ANN has no notion of namespace or metadata, so filter its hits
@@ -393,7 +393,7 @@ _WHERE_OPERATORS: dict[str, Callable[[Any, Any], bool]] = {
 }
 
 
-def _matches_where(metadata: dict[str, Any], where: dict[str, Any]) -> bool:
+def matches_where(metadata: dict[str, Any], where: dict[str, Any]) -> bool:
     """Equality by default (`{"category": "docs"}`); `$op` dicts for the rest.
 
     A missing field or a type mismatch (comparing None against a number,

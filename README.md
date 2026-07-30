@@ -124,6 +124,43 @@ mem.recall("user preferences", recency_weight=0.05, recency_half_life_seconds=7 
 idx.search("deploy", rerank=True)
 ```
 
+### Conversation memory
+
+The most common real agent shape is a chat loop that should remember across turns. `remember_turn()` is a thin convenience over `remember()` for exactly that — `role`/`session_id` land in metadata rather than getting baked into the stored text, so semantic search isn't polluted by a `"user: "` prefix and you can filter or replay by either:
+
+```python
+mem.remember_turn("user", "I prefer dark mode")
+mem.remember_turn("assistant", "Got it, dark mode from now on", session_id="conv-42")
+
+mem.recall("dark mode", where={"role": "user"})       # who said it
+mem.list(where={"session_id": "conv-42"})              # replay one conversation, in order (list(), not recall() — no query needed)
+```
+
+### Wiring into an existing agent loop or framework
+
+Three ways to plug rmbr into whatever's already running your agent, without going through MCP:
+
+```python
+# Raw OpenAI/Anthropic tool-calling — one line to get a ready-made tool
+# definition plus a callable, in either API's shape:
+tool = idx.as_tool()
+response = client.messages.create(..., tools=[tool.to_anthropic()])
+result = tool.call(**tool_use_block.input)          # dispatches to idx.search()
+
+recall_tool, remember_tool = mem.as_tools()          # or as_tools(read_only=True) for recall only
+
+# LangChain — wraps Index as a real BaseRetriever, drops into any chain
+# (pip install langchain-core, or whatever LangChain distribution you're on):
+retriever = idx.as_langchain_retriever(k=5)
+retriever.invoke("how do I deploy?")                 # -> list[Document]
+
+# LlamaIndex — same idea (pip install llama-index-core):
+retriever = idx.as_llamaindex_retriever(k=5)
+retriever.retrieve("how do I deploy?")                # -> list[NodeWithScore]
+```
+
+Both retriever adapters accept the same `search()` keyword arguments (`where=`, `min_similarity=`, `rerank=`, ...) and have async equivalents (`retriever.ainvoke(...)` / `retriever.aretrieve(...)`, backed by `Index.asearch()`). Neither `langchain-core` nor `llama-index-core` is a required rmbr dependency — each adapter imports its target framework lazily, only when you actually call `as_langchain_retriever()`/`as_llamaindex_retriever()`.
+
 ### Restricting access between agents
 
 ```python
@@ -185,7 +222,7 @@ git clone https://github.com/SRock44/rmbr.git
 cd rmbr
 python -m venv .venv && source .venv/bin/activate   # .venv\Scripts\activate on Windows
 pip install --only-binary :all: -e .
-pytest tests/    # 151 tests, no network or API key required
+pytest tests/    # 169 tests, no network or API key required
 ```
 
 The default embedder (`fastembed`, a local ONNX model) downloads its model weights on first use. Every test in `tests/` instead uses `rmbr.embed.FakeEmbedder` — a deterministic, dependency-free embedder — so the suite runs fully offline; you can inject the same `FakeEmbedder` into your own tests via `Memory(..., embedder=FakeEmbedder())` / `Index(..., embedder=FakeEmbedder())`.
@@ -323,8 +360,8 @@ Full data and every candidate's per-category breakdown: `python bench/quality.py
 ## Roadmap
 
 - **v0.1** — `Memory` + `Policy` + `Index` (hybrid BM25 + vector search, metadata filtering), embedding + semantic query caches, MCP support (namespace-pinned), 3-OS CI (Linux/Windows/macOS), true batch ingestion with per-stage timings, async API surface (`a`-prefixed methods), a Python-aware chunker (stdlib `ast`, no added dependency), one hosted embedding provider (OpenAI), a 150-example quality eval that confirmed the default embedder against local alternatives, real single-call and bulk benchmark numbers, PyPI trusted publishing, a `uvx`-launchable console script, and a listing on the [official MCP registry](https://registry.modelcontextprotocol.io)
-- **v0.2** — similarity-based memory dedupe/update (`dedupe_threshold`), bounded retention (`max_memories`, `forget_older_than`), recency-weighted ranking for `Memory.recall()`, richer `where=` filtering (`$gt`/`$gte`/`$lt`/`$lte`/`$in`/`$nin`/`$ne`, not just equality), a real confidence gate on raw cosine similarity (`min_similarity`, plus `hit.bm25_score`/`hit.vector_score` on every result), and an optional local cross-encoder reranker (`rerank=True`)
-- **Known gaps** — Voyage/Cohere embedding providers (same `Embedder` protocol as `OpenAIEmbedder`, not yet written), more auto-detected chunkers (currently text/markdown/python), recency-weighted ranking isn't available for `Index.search()` yet (chunks aren't individually timestamped)
+- **v0.2** — similarity-based memory dedupe/update (`dedupe_threshold`), bounded retention (`max_memories`, `forget_older_than`), recency-weighted ranking for `Memory.recall()`, richer `where=` filtering (`$gt`/`$gte`/`$lt`/`$lte`/`$in`/`$nin`/`$ne`, not just equality, now also usable on `Memory.list()`), a real confidence gate on raw cosine similarity (`min_similarity`, plus `hit.bm25_score`/`hit.vector_score` on every result), an optional local cross-encoder reranker (`rerank=True`), a conversation-memory convenience (`remember_turn()`), tool-calling export for hand-rolled agent loops (`as_tool()`/`as_tools()`, OpenAI- and Anthropic-shaped), and LangChain/LlamaIndex retriever adapters (`as_langchain_retriever()`/`as_llamaindex_retriever()`, both optional/lazy-imported)
+- **Known gaps** — Voyage/Cohere embedding providers (same `Embedder` protocol as `OpenAIEmbedder`, not yet written), more auto-detected chunkers (currently text/markdown/python), recency-weighted ranking isn't available for `Index.search()` yet (chunks aren't individually timestamped), tool-calling export doesn't yet expose the newer search knobs (`min_similarity`/`rerank`/`where`) as tool parameters — only `query`/`k`
 - **Next** — a pluggable consolidation hook (`mem.consolidate(extractor)`): rmbr still never calls an LLM itself, but a caller-supplied extractor callable would let rmbr orchestrate mem0-style fact extraction/dedup/update against your own model choice, without rmbr owning an API key. Design in progress, not yet built.
 
 ## License

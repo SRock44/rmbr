@@ -32,8 +32,9 @@ from .ann import AnnIndex
 from .embed import Embedder
 from .policy import Policy
 from .rerank import CrossEncoderReranker
-from .search import DEFAULT_RECENCY_HALF_LIFE_SECONDS, Hits, hybrid_search
+from .search import DEFAULT_RECENCY_HALF_LIFE_SECONDS, Hits, hybrid_search, matches_where
 from .store import MemoryRecord, Store
+from .tools import ToolSpec, memory_tools
 
 _COLLECTION = "memories"
 _UNSET = object()  # distinguishes "not passed" from "explicitly None" for dedupe_threshold
@@ -201,6 +202,57 @@ class Memory:
             self._reranker = CrossEncoderReranker()
         return self._reranker
 
+    def as_tools(self, *, read_only: bool = False) -> list[ToolSpec]:
+        """`ToolSpec`s for this Memory's `recall()` (and `remember()`, unless
+        `read_only`) — ready for a hand-rolled agent loop that isn't using
+        MCP. Plural, unlike `Index.as_tool()`, since there are one or two
+        of them:
+
+            recall_tool, remember_tool = mem.as_tools()
+            tools = [t.to_openai() for t in mem.as_tools()]
+            # when the model calls "remember":
+            memory_id = remember_tool.call(text="user prefers dark mode")
+
+        `serve_mcp()` exposes the equivalent tools over MCP (same
+        `read_only` semantics) if you want a subprocess-based client
+        instead of wiring this into your own loop.
+        """
+        return memory_tools(self, read_only=read_only)
+
+    def remember_turn(
+        self,
+        role: str,
+        content: str,
+        *,
+        session_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        namespace: str | None = None,
+        dedupe_threshold: float | None = _UNSET,  # type: ignore[assignment]
+    ) -> int:
+        """Save one turn of a conversation as a memory — a thin convenience
+        over `remember()` for the most common real agent shape: a chat loop
+        that should remember what was said.
+
+            mem.remember_turn("user", "I prefer dark mode")
+            mem.remember_turn("assistant", "Got it, dark mode from now on", session_id="conv-42")
+
+            mem.recall("dark mode", where={"role": "user"})            # who said it
+            mem.list(where={"session_id": "conv-42"})                  # replay one conversation, in order
+
+        `role`/`session_id` land in metadata (merged with anything you pass
+        via `metadata`) rather than being baked into the stored text, so
+        semantic search isn't polluted by a "user: " prefix and `where=`
+        can filter on them directly. `session_id` is optional — omit it if
+        your app has no notion of separate conversations, or the namespace
+        itself already scopes to one.
+        """
+        turn_metadata = {"role": role, **(metadata or {})}
+        if session_id is not None:
+            turn_metadata["session_id"] = session_id
+        return self.remember(
+            content, metadata=turn_metadata, namespace=namespace, dedupe_threshold=dedupe_threshold
+        )
+
     def forget(self, memory_id: int) -> None:
         """Delete a memory by id. No-op if it doesn't exist.
 
@@ -245,9 +297,25 @@ class Memory:
             self._store.clear_query_cache()
         return len(deleted_ids)
 
-    def list(self, *, limit: int | None = None) -> list[MemoryRecord]:
-        """List this namespace's memories, most recent first."""
-        return self._store.list_memories(self.namespace, limit=limit)
+    def list(self, *, limit: int | None = None, where: dict[str, Any] | None = None) -> list[MemoryRecord]:
+        """List this namespace's memories, most recent first.
+
+        `where` filters by metadata using the same operators as `recall()`
+        (see `search.hybrid_search`'s docstring) — unlike `recall()`, this
+        doesn't rank by relevance to a query, so it's the right call for
+        "give me this whole conversation in order" (see `remember_turn()`)
+        rather than "what's relevant to X". Filtering happens after
+        fetching every memory in the namespace (there's no metadata index
+        to push it into), so `limit` is applied after the filter, not
+        before — fine at the scale a single agent's memory lives at,
+        worth knowing if that namespace is huge.
+        """
+        records = self._store.list_memories(self.namespace, limit=None if where else limit)
+        if where:
+            records = [r for r in records if matches_where(r.metadata, where)]
+            if limit is not None:
+                records = records[:limit]
+        return records
 
     def close(self) -> None:
         self._store.close()
@@ -270,6 +338,10 @@ class Memory:
     async def aremember(self, text: str, **kwargs: Any) -> int:
         async with self._alock:
             return await asyncio.to_thread(self.remember, text, **kwargs)
+
+    async def aremember_turn(self, role: str, content: str, **kwargs: Any) -> int:
+        async with self._alock:
+            return await asyncio.to_thread(self.remember_turn, role, content, **kwargs)
 
     async def arecall(self, query: str, **kwargs: Any) -> Hits:
         async with self._alock:

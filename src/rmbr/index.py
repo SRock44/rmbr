@@ -35,6 +35,7 @@ from .policy import Policy
 from .rerank import CrossEncoderReranker
 from .search import Hits, hybrid_search
 from .store import Store
+from .tools import ToolSpec, index_search_tool
 
 _COLLECTION = "chunks"
 _TEXT_SUFFIXES = {
@@ -326,6 +327,52 @@ class Index:
         if self._reranker is None:
             self._reranker = CrossEncoderReranker()
         return self._reranker
+
+    def as_tool(self, *, name: str = "search") -> ToolSpec:
+        """A `ToolSpec` for this Index's `search()` — ready for a hand-rolled
+        agent loop that isn't using MCP.
+
+            tool = idx.as_tool()
+            response = client.messages.create(..., tools=[tool.to_anthropic()])
+            # when the model calls it:
+            result = tool.call(**tool_use_block.input)
+
+        Same search this instance already does — namespace/policy scoping
+        is whatever this `Index` was constructed with, same as every other
+        call on it. `serve_mcp()` exposes the equivalent tool over MCP if
+        you want a subprocess-based client instead of wiring this into
+        your own loop.
+        """
+        return index_search_tool(self, name=name)
+
+    def as_langchain_retriever(self, *, k: int = 5, **search_kwargs: Any) -> Any:
+        """Wrap this Index as a LangChain `BaseRetriever`. Requires `langchain-core`
+        (`pip install langchain-core`, or whatever full LangChain distribution
+        you're already using) — imported lazily, not a hard rmbr dependency.
+
+            retriever = idx.as_langchain_retriever(k=5)
+            retriever.invoke("how do I deploy?")   # -> list[Document]
+
+        Extra `search_kwargs` (`where=`, `min_similarity=`, `rerank=`, ...)
+        are passed straight through to `search()`/`asearch()` on every call.
+        """
+        from .integrations.langchain import as_retriever
+
+        return as_retriever(self, k=k, **search_kwargs)
+
+    def as_llamaindex_retriever(self, *, k: int = 5, **search_kwargs: Any) -> Any:
+        """Wrap this Index as a LlamaIndex `BaseRetriever`. Requires
+        `llama-index-core` — imported lazily, not a hard rmbr dependency.
+
+            retriever = idx.as_llamaindex_retriever(k=5)
+            retriever.retrieve("how do I deploy?")   # -> list[NodeWithScore]
+
+        Extra `search_kwargs` are passed straight through to `search()`/
+        `asearch()` on every call, same as `as_langchain_retriever()`.
+        """
+        from .integrations.llamaindex import as_retriever
+
+        return as_retriever(self, k=k, **search_kwargs)
 
     def delete(self, document_id: int) -> None:
         """Delete a document, its chunks, and their vectors. No-op if it doesn't exist."""
