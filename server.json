@@ -1,0 +1,43 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.SRock44/rmbr",
+  "title": "rmbr",
+  "description": "Embedded, local-first memory and retrieval for AI agents. One SQLite file, no server, no API key.",
+  "repository": {
+    "url": "https://github.com/SRock44/rmbr",
+    "source": "github"
+  },
+  "version": "0.1.1",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "rmbr",
+      "version": "0.1.1",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "valueHint": "path_to_db",
+          "description": "Path to the .db file (created if it doesn't exist)",
+          "isRequired": true
+        },
+        {
+          "type": "named",
+          "name": "--namespace",
+          "description": "Namespace to expose over MCP (default: 'default')",
+          "isRequired": false
+        },
+        {
+          "type": "named",
+          "name": "--read-only",
+          "description": "Disable the remember tool, exposing only search and recall",
+          "isRequired": false
+        }
+      ]
+    }
+  ]
+}
