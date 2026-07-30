@@ -1,10 +1,12 @@
 # rmbr
 
+<!-- mcp-name: io.github.SRock44/rmbr -->
+
 > **Give your agent memory and knowledge. One file, three lines, no server, no API key.**
 
 `rmbr` ("remember", vowels deleted) is an embedded, local-first **memory + retrieval engine for AI agents and LLM apps** — what SQLite is to Postgres, rmbr aims to be to hosted memory services.
 
-> **v0.1.0 — first real release.** `pip install rmbr` gets you a working library: `Memory`, `Index`, `Policy`, and MCP support (below), all implemented and tested — see [docs/PLAN.md](docs/PLAN.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design.
+> **v0.1.1.** `pip install rmbr` gets you a working library: `Memory`, `Index`, `Policy`, and MCP support (below), all implemented and tested — see [docs/PLAN.md](docs/PLAN.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design.
 
 ## Why
 
@@ -198,10 +200,12 @@ Three tools, all pinned to whatever namespace you pass at startup (see [Multi-ag
 
 ### Connecting a client
 
-`serve_mcp()` blocks on stdio; it's meant to be launched as a subprocess by an MCP client, not called from inside your own long-running app. `python -m rmbr` is the launch shim for exactly that:
+`serve_mcp()` blocks on stdio; it's meant to be launched as a subprocess by an MCP client, not called from inside your own long-running app. `python -m rmbr` is the launch shim for exactly that (the package also installs a `rmbr` console script pointing at the same thing, so `uvx rmbr` works without a local install):
 
 ```bash
 python -m rmbr agents.db --namespace coder --read-only
+# or, via the installed console script / uvx:
+rmbr agents.db --namespace coder --read-only
 ```
 
 For Claude Desktop or Claude Code, add it to your MCP config (Claude Desktop's `claude_desktop_config.json`, or a project's `.mcp.json`):
@@ -210,8 +214,8 @@ For Claude Desktop or Claude Code, add it to your MCP config (Claude Desktop's `
 {
   "mcpServers": {
     "rmbr-coder": {
-      "command": "python",
-      "args": ["-m", "rmbr", "/absolute/path/to/agents.db", "--namespace", "coder", "--read-only"]
+      "command": "uvx",
+      "args": ["rmbr", "/absolute/path/to/agents.db", "--namespace", "coder", "--read-only"]
     }
   }
 }

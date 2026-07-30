@@ -4,9 +4,11 @@ rmbr has no command-line interface: you don't "run rmbr" the way you'd
 run a server. This module exists only so an MCP client (Claude Desktop,
 another agent's tool-launcher) can start `serve_mcp()` as a subprocess by
 pointing at `python -m rmbr`, the same way any other stdio MCP server is
-launched.
+launched. The package also installs a `rmbr` console script pointing at
+this same `main()`, so `uvx rmbr ...` works too.
 
     python -m rmbr agents.db --namespace coder --read-only
+    rmbr agents.db --namespace coder --read-only
 """
 
 from __future__ import annotations
