@@ -10,8 +10,7 @@
     idx.add_files("docs/")
     idx.search("how do I deploy?", k=5)
 
-v0.1 is in active development. Watch the repository for the first
-tagged release: https://github.com/SRock44/rmbr
+Source and design docs: https://github.com/SRock44/rmbr
 """
 
 from .index import Index
@@ -19,6 +18,6 @@ from .mcp_server import serve_mcp
 from .memory import Memory
 from .policy import Policy
 
-__version__ = "0.0.1"
+__version__ = "0.1.0"
 
 __all__ = ["Memory", "Index", "Policy", "serve_mcp"]

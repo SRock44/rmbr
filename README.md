@@ -4,7 +4,7 @@
 
 `rmbr` ("remember", vowels deleted) is an embedded, local-first **memory + retrieval engine for AI agents and LLM apps** — what SQLite is to Postgres, rmbr aims to be to hosted memory services.
 
-> ⚠️ **Status: pre-release.** `Memory`, `Index`, `Policy`, and MCP support (below) are implemented and tested in this repo — see [docs/PLAN.md](docs/PLAN.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design. Not yet published to PyPI as a working release (the `rmbr` package there today is a name-holding stub) — watch this repo for the tagged v0.1.0 release.
+> **v0.1.0 — first real release.** `pip install rmbr` gets you a working library: `Memory`, `Index`, `Policy`, and MCP support (below), all implemented and tested — see [docs/PLAN.md](docs/PLAN.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design.
 
 ## Why
 
@@ -136,9 +136,7 @@ serve_mcp("agents.db", namespace="coder", read_only=True)
 
 See [MCP support](#mcp-support) below for what this exposes and how to actually connect a client to it.
 
-### Try it from source
-
-Not on PyPI as a working release yet, but every line above runs today against this repo:
+### Contributing / running from source
 
 ```bash
 git clone https://github.com/SRock44/rmbr.git
