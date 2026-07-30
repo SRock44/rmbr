@@ -1,3 +1,5 @@
+from unittest.mock import MagicMock
+
 import numpy as np
 import pytest
 
@@ -90,3 +92,38 @@ def test_caching_embedder_embed_one(store):
     cache = CachingEmbedder(CountingEmbedder(), store)
     vec = cache.embed_one("solo text")
     assert vec.shape == (16,)
+
+
+def test_openai_embedder_batches_and_sorts_by_index(monkeypatch):
+    from rmbr.embed import OpenAIEmbedder
+
+    # Deliberately out of request order, to prove the defensive sort works.
+    fake_response = MagicMock()
+    fake_response.data = [
+        MagicMock(embedding=[0.1, 0.2, 0.3], index=1),
+        MagicMock(embedding=[0.4, 0.5, 0.6], index=0),
+    ]
+    mock_client = MagicMock()
+    mock_client.embeddings.create.return_value = fake_response
+    monkeypatch.setattr("openai.OpenAI", lambda *args, **kwargs: mock_client)
+
+    embedder = OpenAIEmbedder(model_name="text-embedding-3-small")
+    vectors = embedder.embed(["first", "second"])
+
+    mock_client.embeddings.create.assert_called_once_with(
+        model="text-embedding-3-small", input=["first", "second"]
+    )
+    assert len(vectors) == 2
+    assert np.allclose(vectors[0], [0.4, 0.5, 0.6])  # index 0
+    assert np.allclose(vectors[1], [0.1, 0.2, 0.3])  # index 1
+
+
+def test_openai_embedder_empty_input_skips_the_api_call(monkeypatch):
+    from rmbr.embed import OpenAIEmbedder
+
+    mock_client = MagicMock()
+    monkeypatch.setattr("openai.OpenAI", lambda *args, **kwargs: mock_client)
+
+    embedder = OpenAIEmbedder()
+    assert embedder.embed([]) == []
+    mock_client.embeddings.create.assert_not_called()

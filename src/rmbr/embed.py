@@ -1,9 +1,11 @@
 """Turning text into vectors, without making that a network call by default.
 
 ``Embedder`` is a tiny protocol — implement ``model_name`` and ``embed()``
-and you can plug in any provider (OpenAI, Voyage, your own model server).
-The default, ``FastEmbedEmbedder``, runs a small ONNX model locally via
-``fastembed``: no API key, no network after the first model download.
+and you can plug in any provider. The default, ``FastEmbedEmbedder``, runs
+a small ONNX model locally via ``fastembed``: no API key, no network after
+the first model download. ``OpenAIEmbedder`` is the one hosted provider
+shipped so far (opt-in, ``pip install rmbr[openai]``) — see its docstring
+for why there's only one.
 
 ``CachingEmbedder`` wraps any embedder with a SQLite-backed content-hash
 cache (see store.py's ``embed_cache`` table), so the same text is never
@@ -61,6 +63,37 @@ class FastEmbedEmbedder:
         if not texts:
             return []
         return [np.asarray(v, dtype=np.float32) for v in self._model.embed(texts)]
+
+
+class OpenAIEmbedder:
+    """Embeddings via OpenAI's API. Opt-in — requires `pip install rmbr[openai]`
+    and an `OPENAI_API_KEY`, same tradeoff as every hosted embedding provider:
+    a network call and a cost per uncached text, in exchange for OpenAI's
+    embedding quality instead of the local ONNX default's.
+
+    This is one provider, not a library of them, on purpose — see
+    docs/PLAN.md's rationale for keeping the provider list short (~4 max)
+    rather than integrating everything. Voyage and Cohere follow the exact
+    same `Embedder` protocol (`model_name` + `embed()`); write one the same
+    shape as this class if you need one before rmbr ships it.
+    """
+
+    def __init__(self, model_name: str = "text-embedding-3-small"):
+        # Imported lazily, same reasoning as FastEmbedEmbedder: importing
+        # rmbr shouldn't require the openai package unless you actually use it.
+        from openai import OpenAI
+
+        self.model_name = model_name
+        self._client = OpenAI()
+
+    def embed(self, texts: list[str]) -> list[np.ndarray]:
+        if not texts:
+            return []
+        response = self._client.embeddings.create(model=self.model_name, input=texts)
+        # The API returns results in request order, but sort by .index
+        # defensively rather than assume that's a permanent guarantee.
+        ordered = sorted(response.data, key=lambda item: item.index)
+        return [np.asarray(item.embedding, dtype=np.float32) for item in ordered]
 
 
 class FakeEmbedder:
