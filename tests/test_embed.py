@@ -95,6 +95,7 @@ def test_caching_embedder_embed_one(store):
 
 
 def test_openai_embedder_batches_and_sorts_by_index(monkeypatch):
+    pytest.importorskip("openai")  # optional extra - pip install rmbr[openai]
     from rmbr.embed import OpenAIEmbedder
 
     # Deliberately out of request order, to prove the defensive sort works.
@@ -119,6 +120,7 @@ def test_openai_embedder_batches_and_sorts_by_index(monkeypatch):
 
 
 def test_openai_embedder_empty_input_skips_the_api_call(monkeypatch):
+    pytest.importorskip("openai")  # optional extra - pip install rmbr[openai]
     from rmbr.embed import OpenAIEmbedder
 
     mock_client = MagicMock()
