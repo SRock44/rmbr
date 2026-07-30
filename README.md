@@ -20,9 +20,8 @@ Concretely, rmbr gives you:
 
 - **One file.** Your agent's entire memory and knowledge base is a single `.db` file — `git commit` it, diff it, roll it back, hand it to a teammate, attach it to a bug report, or check a known-good state into a test fixture for deterministic CI. No hosted memory service lets you do any of that.
 - **Three lines.** `pip install rmbr`, import, remember. No account, no config, no service.
-- **No server, works offline.** Runs inside your process, like SQLite — no network call anywhere in the core memory/retrieval path, by default.
-- **No API key.** Embeddings run locally via a small ONNX model by default. Nothing phones home, ever. Cloud embedding providers (OpenAI/Voyage/Cohere) are strictly opt-in.
-- **Works with every LLM.** rmbr never calls an LLM — it returns relevant text, you feed it to Claude, GPT, Gemini, or a local model. Zero model lock-in by construction.
+- **No added infrastructure.** Your agent already needs a network connection and an API key for its LLM calls — rmbr doesn't add a *second* one just for memory. mem0 defaults to a hosted LLM+embedding API, Zep needs Docker+Neo4j+an LLM key, Letta needs a server+Postgres — all on top of whatever you're already paying for the model itself. rmbr's own memory/retrieval path makes zero network calls by default: one less vendor, one less key to leak, one less service whose outage takes your agent's memory down with it. (It also means rmbr keeps working with a fully local LLM — Ollama, llama.cpp — for genuinely offline or air-gapped use; most people won't need that, but it's there.)
+- **No proprietary format.** rmbr never calls an LLM itself — `recall()`/`search()` return plain strings, floats, and dicts (`hit.text`, `hit.score`, `hit.metadata`). Nothing to parse, no vendor SDK required to consume it — see [Using results with an LLM](#using-results-with-an-llm) below for how that plugs into Claude, GPT, or Gemini identically.
 - **Namespace-pinned multi-agent access.** `Policy` is deny-by-default; MCP tools expose no namespace parameter to override — safe by construction, not by convention.
 
 ## API (v0.1)
@@ -52,6 +51,37 @@ serve_mcp("agents.db", namespace="coder", read_only=True)
 
 Library-only by design — no CLI to learn. (`python -m rmbr` exists solely so MCP clients can launch the server.)
 
+### Using results with an LLM
+
+rmbr never calls a model — `search()`/`recall()` hand you back plain text and a score, and you decide what to do with it. The standard pattern (classic RAG: retrieve, then inject the retrieved text into the prompt) with Claude:
+
+```python
+from anthropic import Anthropic
+from rmbr import Index
+
+idx = Index("agents.db")
+idx.add_files("docs/")
+
+client = Anthropic()  # reads ANTHROPIC_API_KEY from the environment
+
+def answer(question: str) -> str:
+    hits = idx.search(question, k=5)
+    context = "\n\n".join(f"<document>{hit.text}</document>" for hit in hits)
+    response = client.messages.create(
+        model="claude-sonnet-5",
+        max_tokens=1024,
+        # Context before the question, not after — Anthropic's own prompting
+        # docs measure this ordering as meaningfully better for long-context
+        # RAG, though it isn't required for correctness.
+        messages=[{"role": "user", "content": f"{context}\n\nUsing the documents above, answer: {question}"}],
+    )
+    return response.content[0].text
+
+answer("how do I deploy?")
+```
+
+This isn't Claude-specific. `hit.text` is a plain Python string with no wrapper, no provider object, nothing rmbr-proprietary — the exact same `context` string above drops verbatim into OpenAI's `messages` array (`client.chat.completions.create(model=..., messages=[...])`) or Gemini's `contents`. Every mainstream chat-completion API takes the same fundamental shape (a list of role-tagged text messages), which is why "retrieve text, put it in the prompt" — the only integration contract rmbr makes — works identically across providers. Swap the SDK call, nothing else changes.
+
 ### Try it from source
 
 Not on PyPI as a working release yet, but every line above runs today against this repo:
@@ -71,6 +101,29 @@ The default embedder (`fastembed`, a local ONNX model) downloads its model weigh
 - **Namespaces** keep agents' memories separate and are enforced on every call — but they are *organizational*, not cryptographic. Any code with access to the file can open the file. That's true of every embedded database; we say it out loud.
 - **Hard isolation** = separate `.db` files per trust boundary, plus OS file permissions.
 - **MCP serving is namespace-pinned:** the exposed tools have no namespace parameter, so an external agent structurally cannot query outside its lane — unlike every other MCP memory server we looked at, where the scope is a parameter the calling model supplies (and could be talked into changing).
+
+A concrete team topology — one supervisor with a broad grant, two specialists that can't see each other, one external MCP client pinned to a single lane, all in the same `agents.db` file:
+
+```mermaid
+flowchart TB
+    subgraph db["agents.db — one SQLite file"]
+        direction LR
+        supNS[("supervisor<br/>namespace")]
+        coderNS[("coder<br/>namespace")]
+        researchNS[("researcher<br/>namespace")]
+    end
+
+    supervisor["Supervisor agent<br/>policy.allow('supervisor', read='*')"] ==>|read + write| supNS
+    supervisor -.->|read, explicitly granted| coderNS
+    supervisor -.->|read, explicitly granted| researchNS
+
+    coder["Coder agent<br/>Memory(path, namespace='coder')"] ==>|read + write| coderNS
+    researcher["Researcher agent<br/>Memory(path, namespace='researcher')"] ==>|read + write| researchNS
+
+    external["External MCP client<br/>(Claude Code, Cursor, ...)"] -->|"serve_mcp(path, namespace='coder')"| coderNS
+```
+
+The coder and researcher namespaces have no path between them on this diagram — that's the point, not an omission. Nothing needed to be configured to deny that access; only the supervisor's grant (`read="*"`) is explicit. The external MCP client's tool schema has no `namespace` argument at all, so it structurally cannot ask for anything outside `coder`, no matter what a document it's summarizing tells it to try.
 
 ## Alternatives
 
