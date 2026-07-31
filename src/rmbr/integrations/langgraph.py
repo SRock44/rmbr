@@ -63,8 +63,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Iterable
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Iterable
+from typing import TYPE_CHECKING, Any
 
 from ..embed import Embedder
 from ..memory import Memory
@@ -118,14 +119,14 @@ def as_store(
         def _known_namespaces(self) -> list[tuple[str, ...]]:
             return [self._ns_tuple(ns) for ns in self._raw_store.list_memory_namespaces()]
 
-        def batch(self, ops: Iterable["Op"]) -> list["Result"]:
+        def batch(self, ops: Iterable[Op]) -> list[Result]:
             return [self._run_op(op) for op in ops]
 
-        async def abatch(self, ops: Iterable["Op"]) -> list["Result"]:
+        async def abatch(self, ops: Iterable[Op]) -> list[Result]:
             ops = list(ops)
             return await asyncio.to_thread(self.batch, ops)
 
-        def _run_op(self, op: "Op") -> Any:
+        def _run_op(self, op: Op) -> Any:
             if isinstance(op, GetOp):
                 return self._get(op)
             if isinstance(op, SearchOp):
@@ -136,7 +137,7 @@ def as_store(
                 return self._list_namespaces(op)
             raise TypeError(f"RmbrStore received an unknown op type: {type(op)!r}")
 
-        def _get(self, op: "GetOp") -> Any:
+        def _get(self, op: GetOp) -> Any:
             from langgraph.store.base import Item
 
             record = _find_by_key(self._memory_for(op.namespace), op.key)
@@ -151,7 +152,7 @@ def as_store(
                 updated_at=created,
             )
 
-        def _put(self, op: "PutOp") -> None:
+        def _put(self, op: PutOp) -> None:
             memory = self._memory_for(op.namespace)
             existing = _find_by_key(memory, op.key)
             if op.value is None:  # BaseStore's delete signal
@@ -167,7 +168,7 @@ def as_store(
             memory.remember(text, metadata=metadata)
             return None
 
-        def _search(self, op: "SearchOp") -> list[Any]:
+        def _search(self, op: SearchOp) -> list[Any]:
             from langgraph.store.base import SearchItem
 
             prefix = op.namespace_prefix
@@ -207,7 +208,7 @@ def as_store(
                 )
             return items
 
-        def _list_namespaces(self, op: "ListNamespacesOp") -> list[tuple[str, ...]]:
+        def _list_namespaces(self, op: ListNamespacesOp) -> list[tuple[str, ...]]:
             namespaces: Iterable[tuple[str, ...]] = self._known_namespaces()
             if op.match_conditions:
                 namespaces = [
