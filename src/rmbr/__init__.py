@@ -13,7 +13,7 @@
 Source and design docs: https://github.com/SRock44/rmbr
 """
 
-__version__ = "0.2.2"
+__version__ = "0.2.3"
 
 from .index import Index
 from .mcp_server import serve_mcp
