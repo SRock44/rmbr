@@ -242,6 +242,32 @@ def test_max_memories_evicts_oldest(tmp_path):
     assert {m.text for m in memories} == {"second", "third"}
 
 
+def test_max_memories_never_evicts_pinned_memory(tmp_path):
+    db = tmp_path / "agents.db"
+    mem = Memory(str(db), "researcher", embedder=FakeEmbedder(dimension=16), max_memories=2)
+    mem.remember("critical fact", pinned=True)
+    mem.remember("second")
+    mem.remember("third")
+    mem.remember("fourth")
+
+    memories = mem.list()
+    texts = {m.text for m in memories}
+    assert "critical fact" in texts  # survives despite being oldest
+    # only the most recent 2 *unpinned* memories are kept alongside it
+    assert len(memories) == 3
+    assert texts == {"critical fact", "third", "fourth"}
+
+
+def test_pinned_memory_findable_via_where_filter(tmp_path):
+    db = tmp_path / "agents.db"
+    mem = make_memory(db, "researcher")
+    mem.remember("important", pinned=True)
+    mem.remember("ordinary")
+
+    pinned = mem.list(where={"_pinned": True})
+    assert [m.text for m in pinned] == ["important"]
+
+
 def test_forget_older_than_deletes_only_stale_memories(tmp_path):
     db = tmp_path / "agents.db"
     mem = make_memory(db, "researcher")
@@ -370,3 +396,71 @@ def test_async_aremember_turn(tmp_path):
     memory_id = asyncio.run(run())
     assert mem.list()[0].id == memory_id
     assert mem.list()[0].metadata["session_id"] == "conv-async"
+
+
+def test_stats_reports_count_and_time_range_for_own_namespace(tmp_path):
+    db = tmp_path / "agents.db"
+    mem = make_memory(db, "researcher")
+    mem.remember("first")
+    mem.remember("second")
+
+    stats = mem.stats()
+    assert stats["researcher"]["count"] == 2
+    assert stats["researcher"]["oldest"] <= stats["researcher"]["newest"]
+
+
+def test_stats_empty_namespace_reports_zero_count(tmp_path):
+    db = tmp_path / "agents.db"
+    mem = make_memory(db, "researcher")
+
+    stats = mem.stats()
+    assert stats["researcher"]["count"] == 0
+    assert stats["researcher"]["oldest"] is None
+
+
+def test_stats_wildcard_respects_policy(tmp_path):
+    db = tmp_path / "agents.db"
+    policy = Policy()
+    policy.allow("supervisor", read="*")
+    make_memory(db, "coder").remember("coder note")
+    make_memory(db, "researcher").remember("researcher note")
+    supervisor = Memory(str(db), "supervisor", embedder=FakeEmbedder(dimension=16), policy=policy)
+
+    stats = supervisor.stats(namespaces="*")
+    assert stats["coder"]["count"] == 1
+    assert stats["researcher"]["count"] == 1
+
+
+def test_stats_explicit_cross_namespace_denied_by_default(tmp_path):
+    db = tmp_path / "agents.db"
+    make_memory(db, "researcher").remember("note")
+    coder = make_memory(db, "coder")
+
+    with pytest.raises(PermissionError):
+        coder.stats(namespaces="researcher")
+
+
+def test_integrity_check_reports_no_problems_on_a_healthy_store(tmp_path):
+    db = tmp_path / "agents.db"
+    mem = make_memory(db, "researcher")
+    mem.remember("first")
+    mem.remember("second")
+
+    assert mem.integrity_check() == []
+
+
+def test_integrity_check_flags_a_row_with_no_vector(tmp_path):
+    db = tmp_path / "agents.db"
+    mem = make_memory(db, "researcher")
+    mem.remember("first")
+    # Simulate corruption: a row exists in SQLite with no corresponding
+    # vector, bypassing rmbr's own write path entirely.
+    mem._store.conn.execute(
+        "INSERT INTO memories(namespace, text, metadata, created_at) VALUES (?, ?, ?, ?)",
+        ("researcher", "orphaned row", "{}", "2020-01-01T00:00:00+00:00"),
+    )
+    mem._store.conn.commit()
+
+    problems = mem.integrity_check()
+    assert len(problems) == 1
+    assert "no vector" in problems[0]

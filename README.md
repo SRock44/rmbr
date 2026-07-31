@@ -104,7 +104,23 @@ mem.remember("user really prefers dark mode")  # updates the same row if similar
 # or prune on your own schedule:
 mem = Memory("agents.db", namespace="assistant", max_memories=5000)
 mem.forget_older_than(60 * 60 * 24 * 30)     # delete anything older than 30 days
+
+# max_memories eviction is pure recency by default, which is a real risk once
+# you rely on it - a trivial fact from an hour ago would otherwise outlive a
+# critical one from last week for no reason but timestamp. Exempt specific
+# memories from it:
+mem.remember("the customer's account was permanently deactivated", pinned=True)
 ```
+
+Check on a namespace's memory without hand-writing SQL:
+
+```python
+mem.stats()                       # {"assistant": {"count": 412, "oldest": "...", "newest": "..."}}
+mem.stats(namespaces="*")         # same, broken down per namespace this policy can read
+mem.integrity_check()             # [] if healthy; otherwise, what's wrong and which ids
+```
+
+`Index` has the same two methods, reporting `documents`/`chunks` counts instead.
 
 ### Precision knobs for search
 
@@ -173,6 +189,8 @@ Both retriever adapters accept the same `search()` keyword arguments (`where=`, 
 tool.call(query="how do I deploy?", where={"tier": "public"}, min_similarity=0.6, rerank=True)
 ```
 
+Every built-in schema sets `additionalProperties: false`, and `tool.call()` validates arguments against it before dispatching — a model that hallucinates an argument (smaller/faster models do this more than you'd hope) gets back a `ToolCallError` naming the actual problem, safe to feed straight back as a tool-result error, instead of a bare Python `TypeError` taking down your process. For providers that support it, `to_anthropic(strict=True)` / `to_openai(strict=True)` asks the provider itself to reject a malformed call before it's even dispatched — a complement to, not a replacement for, `call()`'s own validation, since not every provider enforces `strict` as tightly as it's documented to.
+
 ### Restricting access between agents
 
 ```python
@@ -234,7 +252,7 @@ git clone https://github.com/SRock44/rmbr.git
 cd rmbr
 python -m venv .venv && source .venv/bin/activate   # .venv\Scripts\activate on Windows
 pip install --only-binary :all: -e .
-pytest tests/    # 192 tests, no network or API key required
+pytest tests/    # 214 tests, no network or API key required
 ```
 
 The default embedder (`fastembed`, a local ONNX model) downloads its model weights on first use. Every test in `tests/` instead uses `rmbr.embed.FakeEmbedder` — a deterministic, dependency-free embedder — so the suite runs fully offline; you can inject the same `FakeEmbedder` into your own tests via `Memory(..., embedder=FakeEmbedder())` / `Index(..., embedder=FakeEmbedder())`.
@@ -379,7 +397,7 @@ Full data and every candidate's per-category breakdown: `python bench/quality.py
 
 - **v0.1** — `Memory` + `Policy` + `Index` (hybrid BM25 + vector search, metadata filtering), embedding + semantic query caches, MCP support (namespace-pinned), 3-OS CI (Linux/Windows/macOS), true batch ingestion with per-stage timings, async API surface (`a`-prefixed methods), a Python-aware chunker (stdlib `ast`, no added dependency), one hosted embedding provider (OpenAI), a 150-example quality eval that confirmed the default embedder against local alternatives, real single-call and bulk benchmark numbers, PyPI trusted publishing, a `uvx`-launchable console script, and a listing on the [official MCP registry](https://registry.modelcontextprotocol.io)
 - **v0.2** — similarity-based memory dedupe/update (`dedupe_threshold`), bounded retention (`max_memories`, `forget_older_than`), recency-weighted ranking for both `Memory.recall()` and `Index.search()`, richer `where=` filtering (`$gt`/`$gte`/`$lt`/`$lte`/`$in`/`$nin`/`$ne`, not just equality, now also usable on `Memory.list()`), a real confidence gate on raw cosine similarity (`min_similarity`, plus `hit.bm25_score`/`hit.vector_score` on every result), an optional local cross-encoder reranker (`rerank=True`), a conversation-memory convenience (`remember_turn()`), tool-calling export for hand-rolled agent loops (`as_tool()`/`as_tools()`, OpenAI- and Anthropic-shaped, exposing the full `where`/`min_similarity`/`rerank` knob set — not just `query`/`k`), LangChain/LlamaIndex retriever adapters (`as_langchain_retriever()`/`as_llamaindex_retriever()`, both optional/lazy-imported), two more hosted embedding providers (`VoyageEmbedder`, `CohereEmbedder` — same `Embedder` protocol as `OpenAIEmbedder`), and two more auto-detected chunkers (`split_json`, `split_rst`, both stdlib-only)
-- **v0.2.1** — adoption/DX polish: a `py.typed` marker (mypy/pyright now trust rmbr's type hints), README badges (PyPI/CI/license/Python versions), pinned `rerank=True`/`recency_weight` latency numbers alongside the existing `remember()`/`search()` table, and a `bench/latency.py` fix (each scenario now runs in its own subprocess — running them in one process was polluting each other's tail-latency numbers)
+- **v0.2.1** — adoption/DX polish: a `py.typed` marker (mypy/pyright now trust rmbr's type hints), README badges (PyPI/CI/license/Python versions), pinned `rerank=True`/`recency_weight` latency numbers alongside the existing `remember()`/`search()` table, a `bench/latency.py` fix (each scenario now runs in its own subprocess — running them in one process was polluting each other's tail-latency numbers), and a runnable multi-agent support example (`examples/multi_agent_support/`). Hardened against real-world tool-calling failure modes surfaced by stress-testing the example against a small, fast, unreliable model: `ToolSpec.call()` now validates arguments against the tool's own schema and raises a clear `ToolCallError` instead of a bare `TypeError` when a model hallucinates one; every built-in tool schema sets `additionalProperties: false`; `to_anthropic()`/`to_openai()` gained a `strict=True` option; `Memory`/`Index` gained `stats()` and `integrity_check()` for inspecting a `.db` file's health without hand-writing SQL; and `remember(..., pinned=True)` exempts specific memories from `max_memories`' otherwise-pure-recency eviction
 - **Known gaps** — none carried over from v0.2's list; nothing new opened yet
 - **Next** — a pluggable consolidation hook (`mem.consolidate(extractor)`): rmbr still never calls an LLM itself, but a caller-supplied extractor callable would let rmbr orchestrate mem0-style fact extraction/dedup/update against your own model choice, without rmbr owning an API key. Design in progress, not yet built.
 
