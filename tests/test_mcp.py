@@ -77,3 +77,46 @@ async def test_read_only_server_has_no_remember_tool_to_call(tmp_path):
     server = build(tmp_path / "agents.db", namespace="coder", read_only=True)
     with pytest.raises(Exception):
         await server.call_tool("remember", {"text": "should not work"})
+
+
+def test_server_reports_rmbr_version(tmp_path):
+    from rmbr import __version__
+
+    server = build(tmp_path / "agents.db", namespace="coder")
+    assert server.version == __version__
+
+
+@pytest.mark.anyio
+async def test_examples_resource_template_is_registered(tmp_path):
+    server = build(tmp_path / "agents.db", namespace="coder")
+    templates = await server.list_resource_templates()
+    assert [t.uri_template for t in templates] == ["rmbr://examples/{pattern}"]
+
+    resources = await server.list_resources()
+    assert [str(r.uri) for r in resources] == ["rmbr://examples"]
+
+
+@pytest.mark.anyio
+async def test_examples_index_lists_every_pattern(tmp_path):
+    from rmbr.mcp_server import _EXAMPLES
+
+    server = build(tmp_path / "agents.db", namespace="coder")
+    [content] = await server.read_resource("rmbr://examples")
+    for pattern in _EXAMPLES:
+        assert pattern in content.content
+
+
+@pytest.mark.anyio
+async def test_examples_template_returns_runnable_snippet(tmp_path):
+    server = build(tmp_path / "agents.db", namespace="coder")
+    [content] = await server.read_resource("rmbr://examples/basic-memory")
+    assert "mem.remember(" in content.content
+    assert "mem.recall(" in content.content
+
+
+@pytest.mark.anyio
+async def test_examples_template_unknown_pattern_is_helpful_not_an_error(tmp_path):
+    server = build(tmp_path / "agents.db", namespace="coder")
+    [content] = await server.read_resource("rmbr://examples/not-a-real-pattern")
+    assert "Unknown pattern" in content.content
+    assert "basic-memory" in content.content  # names a real, valid option
