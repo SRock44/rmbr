@@ -7,11 +7,19 @@ Raw output cited in the main README's Performance section.
 
 ## `latency_*.json` — single-call latency, real default embedder
 
-The headline numbers in README.md. `bench/latency.py`, 3 runs, 100 samples/run,
-100-call `remember()` benchmark + 100-query `search()` benchmark against a
-500-doc index. Uses rmbr's actual default embedder (local ONNX via
-`fastembed`) — not precomputed vectors — because this measures what a real
-`remember()`/`search()` call actually costs, embedding included.
+The headline numbers in README.md. `bench/latency.py`, 3 runs, 100 samples/run:
+`remember()`, plain `search()`, `search(rerank=True)`, and
+`search(recency_weight=0.3)`, each against a 500-doc index. Uses rmbr's
+actual default embedder (local ONNX via `fastembed`) — not precomputed
+vectors — because this measures what a real call actually costs, embedding
+included.
+
+Each scenario runs in its own subprocess (`bench/latency.py --scenario ...`,
+orchestrated automatically — you don't need to pass that flag yourself).
+Running all scenarios back-to-back in a single process measurably polluted
+each other's tail latency (page cache pressure, ONNX runtime thread reuse,
+GC pauses from building 4 separate several-hundred-doc indices in one
+process) — isolating them is what makes the p95/p99 numbers trustworthy.
 
 ```bash
 pip install -e .

@@ -25,6 +25,7 @@ import argparse
 import json
 import shutil
 import statistics
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -33,6 +34,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from rmbr.index import Index  # noqa: E402
 from rmbr.memory import Memory  # noqa: E402
+
+_SCENARIOS = ("remember", "search", "rerank", "recency")
 
 
 def percentile(values: list[float], p: float) -> float:
@@ -90,16 +93,80 @@ def bench_single_search(db_path: Path, corpus_size: int, n_queries: int) -> tupl
     return overall, embed_share
 
 
+def bench_single_search_reranked(db_path: Path, corpus_size: int, n_queries: int) -> dict:
+    """Same shape as bench_single_search, but with rerank=True - isolates
+    the added cost of the local cross-encoder reranking pass."""
+    idx = Index(str(db_path), namespace="agent")
+    idx.add_texts(
+        [f"document {i}: notes about deployment, testing, and configuration topic {i}" for i in range(corpus_size)]
+    )
+
+    samples = []
+    for i in range(n_queries):
+        t0 = time.perf_counter()
+        idx.search(f"how do I configure topic {i} in a way nobody has asked before?", k=5, rerank=True)
+        samples.append((time.perf_counter() - t0) * 1000)
+    idx.close()
+
+    return summarize(f"search(rerank=True) call ({corpus_size} docs)", samples)
+
+
+def bench_single_search_recency(db_path: Path, corpus_size: int, n_queries: int) -> dict:
+    """Same shape as bench_single_search, but with recency_weight set -
+    isolates the added cost of the exponential-decay recency blend
+    (a pure-Python computation over the candidate pool, no extra model
+    call), on top of the same real embedder as every other scenario here."""
+    idx = Index(str(db_path), namespace="agent")
+    idx.add_texts(
+        [f"document {i}: notes about deployment, testing, and configuration topic {i}" for i in range(corpus_size)]
+    )
+
+    samples = []
+    for i in range(n_queries):
+        t0 = time.perf_counter()
+        idx.search(
+            f"how do I configure topic {i} in a way nobody has asked before?",
+            k=5,
+            recency_weight=0.3,
+        )
+        samples.append((time.perf_counter() - t0) * 1000)
+    idx.close()
+
+    return summarize(f"search(recency_weight=0.3) call ({corpus_size} docs)", samples)
+
+
+def run_scenario(name: str, workdir: Path, n_calls: int, n_queries: int, corpus_size: int) -> list[dict]:
+    if name == "remember":
+        return [bench_single_remember(workdir / "remember.db", n_calls)]
+    if name == "search":
+        overall, embed_share = bench_single_search(workdir / "search.db", corpus_size, n_queries)
+        return [overall, embed_share]
+    if name == "rerank":
+        return [bench_single_search_reranked(workdir / "search_rerank.db", corpus_size, n_queries)]
+    if name == "recency":
+        return [bench_single_search_recency(workdir / "search_recency.db", corpus_size, n_queries)]
+    raise ValueError(f"unknown scenario: {name}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--n-calls", type=int, default=50, help="samples for the remember() benchmark")
     parser.add_argument("--n-queries", type=int, default=50, help="samples for the search() benchmark")
     parser.add_argument("--corpus-size", type=int, default=500, help="docs pre-indexed before searching")
     parser.add_argument("--out", type=Path, default=Path(__file__).parent / "results")
+    parser.add_argument(
+        "--scenario",
+        choices=_SCENARIOS,
+        help=(
+            "internal: run a single scenario in this process and print its JSON "
+            "results to stdout, instead of orchestrating all scenarios as "
+            "isolated subprocesses. Not meant to be passed directly."
+        ),
+    )
     args = parser.parse_args()
 
     args.out.mkdir(parents=True, exist_ok=True)
-    workdir = args.out / "latency_workdir"
+    workdir = args.out / f"latency_workdir{f'_{args.scenario}' if args.scenario else ''}"
     # Every run starts from a clean workdir - remember()/search() calls
     # must genuinely embed each sample's (unique) text via the real
     # model, not silently hit CachingEmbedder's on-disk cache from a
@@ -107,21 +174,58 @@ def main() -> None:
     shutil.rmtree(workdir, ignore_errors=True)
     workdir.mkdir(parents=True)
 
+    if args.scenario:
+        # Run inside a subprocess spawned by the block below - stdout is
+        # reserved for the JSON payload the parent process reads back, so
+        # progress/summary prints from bench_single_*() go to stderr instead.
+        sys.stdout = sys.stderr
+        results = run_scenario(args.scenario, workdir, args.n_calls, args.n_queries, args.corpus_size)
+        sys.stdout = sys.__stdout__
+        print(json.dumps(results))
+        return
+
     print("Warming up the local embedding model (downloads on first use)...")
     warm = Memory(str(workdir / "warmup.db"), namespace="warm")
     warm.remember("warmup call to trigger the one-time model load")
     warm.close()
 
-    print("\nSingle-call latency, real default embedder (local ONNX, fastembed):\n")
-    remember_result = bench_single_remember(workdir / "remember.db", args.n_calls)
-    search_result, embed_share_result = bench_single_search(workdir / "search.db", args.corpus_size, args.n_queries)
+    # Each scenario builds its own several-hundred-doc index and runs its
+    # own batch of real-embedder calls - running all of them back-to-back
+    # in one process measurably pollutes each other's tail latency (page
+    # cache pressure, ONNX runtime thread reuse, GC pauses). Isolating each
+    # scenario in its own subprocess is what makes these numbers trustworthy
+    # enough to publish, not just an engineering nicety.
+    print("\nSingle-call latency, real default embedder (local ONNX, fastembed), one isolated process per scenario:\n")
+    all_results: list[dict] = []
+    for scenario in _SCENARIOS:
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(Path(__file__).resolve()),
+                "--scenario",
+                scenario,
+                "--n-calls",
+                str(args.n_calls),
+                "--n-queries",
+                str(args.n_queries),
+                "--corpus-size",
+                str(args.corpus_size),
+                "--out",
+                str(args.out),
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        sys.stderr.write(proc.stderr)
+        all_results.extend(json.loads(proc.stdout))
 
     out_path = args.out / f"latency_{int(time.time())}.json"
     out_path.write_text(
         json.dumps(
             {
                 "config": {"n_calls": args.n_calls, "n_queries": args.n_queries, "corpus_size": args.corpus_size},
-                "results": [remember_result, search_result, embed_share_result],
+                "results": all_results,
             },
             indent=2,
         )

@@ -2,11 +2,16 @@
 
 <!-- mcp-name: io.github.SRock44/rmbr -->
 
+[![PyPI](https://img.shields.io/pypi/v/rmbr.svg)](https://pypi.org/project/rmbr/)
+[![CI](https://github.com/SRock44/rmbr/actions/workflows/ci.yml/badge.svg)](https://github.com/SRock44/rmbr/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Python versions](https://img.shields.io/pypi/pyversions/rmbr.svg)](https://pypi.org/project/rmbr/)
+
 > **Give your agent memory and knowledge. One file, three lines, no server, no API key.**
 
 `rmbr` ("remember", vowels deleted) is an embedded, local-first **memory + retrieval engine for AI agents and LLM apps** — what SQLite is to Postgres, rmbr aims to be to hosted memory services.
 
-> **v0.2.0.** `pip install rmbr` gets you a working library: `Memory`, `Index`, `Policy`, and MCP support (below), all implemented and tested — see [docs/PLAN.md](docs/PLAN.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design.
+> **v0.2.1.** `pip install rmbr` gets you a working library: `Memory`, `Index`, `Policy`, and MCP support (below), all implemented and tested — see [docs/PLAN.md](docs/PLAN.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design.
 
 ## Why
 
@@ -336,11 +341,15 @@ The number that matters for rmbr's actual usage pattern — an agent calling `re
 
 | operation | p50 | p95 | p99 |
 |---|---:|---:|---:|
-| `mem.remember(text)` | 5.8 ms | 11.1 ms | 11.5 ms |
-| `idx.search(query, k=5)` against a 500-doc index | 3.2 ms | 4.1 ms | 4.2 ms |
-| — of which, query embedding alone | 2.8 ms | 3.1 ms | 3.3 ms |
+| `mem.remember(text)` | 3.0 ms | 5.7 ms | 6.7 ms |
+| `idx.search(query, k=5)` against a 500-doc index | 2.9 ms | 3.6 ms | 3.7 ms |
+| — of which, query embedding alone | 2.5 ms | 2.7 ms | 3.1 ms |
+| `idx.search(query, k=5, rerank=True)` | 12.2 ms | 99.6 ms | 130.2 ms |
+| `idx.search(query, k=5, recency_weight=0.3)` | 2.9 ms | 3.6 ms | 3.8 ms |
 
-Read that last row carefully: **~85-90% of a search call's cost is the embedding model, not rmbr.** rmbr's own storage/retrieval overhead is sub-millisecond. And all of this is imperceptible next to the LLM call that will follow it in any real agent loop — which was rmbr's founding thesis about where RAG latency actually lives (see [docs/PLAN.md](docs/PLAN.md)). Reproduce: `python bench/latency.py`; raw output for all 3 runs is in [`bench/pinned/`](bench/pinned/).
+Read that third row carefully: **~85-90% of a plain search call's cost is the embedding model, not rmbr.** rmbr's own storage/retrieval overhead is sub-millisecond. And all of this is imperceptible next to the LLM call that will follow it in any real agent loop — which was rmbr's founding thesis about where RAG latency actually lives (see [docs/PLAN.md](docs/PLAN.md)).
+
+The last two rows are what v0.2's `rerank=True` and `recency_weight` actually cost on top of a plain search call. `rerank=True` is real, measured cost — a local cross-encoder pass over the candidate pool — because it's doing genuine additional inference, not a free re-sort; its p95/p99 run noticeably higher than its p50 because the reranker model lazy-loads (and, on a cold cache, downloads) on an index's first `rerank=True` call, not at import time — use it when result quality matters more than shaving milliseconds, not on every call by default. `recency_weight` is effectively free (same latency as a plain search, within noise), since it's pure-Python exponential decay math over chunks already fetched, no extra model call. Reproduce: `python bench/latency.py --n-calls 100 --n-queries 100 --corpus-size 500`; raw output for all 3 runs is in [`bench/pinned/`](bench/pinned/).
 
 **Bulk-ingest throughput, for full transparency (not a claim we're leading with):** rmbr batches every write in `add_texts()`/`add_files()` into one SQLite transaction, one embedder call, and one ANN-index insert for the whole batch, rather than once per document — a real, measured improvement from 950 to ~3,000 docs/s on a 5,000-doc synthetic corpus. Note what didn't move much: batching the embed call barely helped *in this specific benchmark*, because it feeds every engine identical precomputed vectors (a near-free dict lookup) specifically to isolate storage/ANN performance — a real embedder (ONNX inference, or an API call) has real fixed per-call overhead that batching actually amortizes, so `bench/latency.py`'s numbers above are the more representative ones for real-world embedding cost. Even after this, rmbr is still slower at pure bulk loading than both purpose-built alternatives: Chroma ingests ~2.6x faster (~7,850 docs/s) and LanceDB ~20-55x faster (~65,000-165,000 docs/s, wide variance across runs), because that's a fundamentally different job (one Arrow batch write, zero per-row relational bookkeeping, in LanceDB's case) than what rmbr is built for. What rmbr does hold its own on: recall@5 (0.95) is competitive with LanceDB's exact search (1.0) and ahead of Chroma's (0.80). Full numbers, all 3 seeds, in [`bench/pinned/`](bench/pinned/) and reproducible via `pip install -e ".[bench]" && python bench/run.py`. We're disclosing this, not hiding it: if bulk document loading at scale is your actual workload, see [Alternatives](#alternatives) above — that's not what rmbr optimizes for.
 
@@ -368,7 +377,8 @@ Full data and every candidate's per-category breakdown: `python bench/quality.py
 
 - **v0.1** — `Memory` + `Policy` + `Index` (hybrid BM25 + vector search, metadata filtering), embedding + semantic query caches, MCP support (namespace-pinned), 3-OS CI (Linux/Windows/macOS), true batch ingestion with per-stage timings, async API surface (`a`-prefixed methods), a Python-aware chunker (stdlib `ast`, no added dependency), one hosted embedding provider (OpenAI), a 150-example quality eval that confirmed the default embedder against local alternatives, real single-call and bulk benchmark numbers, PyPI trusted publishing, a `uvx`-launchable console script, and a listing on the [official MCP registry](https://registry.modelcontextprotocol.io)
 - **v0.2** — similarity-based memory dedupe/update (`dedupe_threshold`), bounded retention (`max_memories`, `forget_older_than`), recency-weighted ranking for both `Memory.recall()` and `Index.search()`, richer `where=` filtering (`$gt`/`$gte`/`$lt`/`$lte`/`$in`/`$nin`/`$ne`, not just equality, now also usable on `Memory.list()`), a real confidence gate on raw cosine similarity (`min_similarity`, plus `hit.bm25_score`/`hit.vector_score` on every result), an optional local cross-encoder reranker (`rerank=True`), a conversation-memory convenience (`remember_turn()`), tool-calling export for hand-rolled agent loops (`as_tool()`/`as_tools()`, OpenAI- and Anthropic-shaped, exposing the full `where`/`min_similarity`/`rerank` knob set — not just `query`/`k`), LangChain/LlamaIndex retriever adapters (`as_langchain_retriever()`/`as_llamaindex_retriever()`, both optional/lazy-imported), two more hosted embedding providers (`VoyageEmbedder`, `CohereEmbedder` — same `Embedder` protocol as `OpenAIEmbedder`), and two more auto-detected chunkers (`split_json`, `split_rst`, both stdlib-only)
-- **Known gaps** — none carried over from v0.1's list; nothing new opened yet
+- **v0.2.1** — adoption/DX polish: a `py.typed` marker (mypy/pyright now trust rmbr's type hints), README badges (PyPI/CI/license/Python versions), pinned `rerank=True`/`recency_weight` latency numbers alongside the existing `remember()`/`search()` table, and a `bench/latency.py` fix (each scenario now runs in its own subprocess — running them in one process was polluting each other's tail-latency numbers)
+- **Known gaps** — none carried over from v0.2's list; nothing new opened yet
 - **Next** — a pluggable consolidation hook (`mem.consolidate(extractor)`): rmbr still never calls an LLM itself, but a caller-supplied extractor callable would let rmbr orchestrate mem0-style fact extraction/dedup/update against your own model choice, without rmbr owning an API key. Design in progress, not yet built.
 
 ## License

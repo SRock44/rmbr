@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rmbr"
-version = "0.2.0"
+version = "0.2.1"
 description = "Give your agent memory and knowledge. One file, three lines, no server, no API key."
 readme = "README.md"
 license = "MIT"
@@ -17,6 +17,7 @@ classifiers = [
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
     "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
 ]
 dependencies = [
     "numpy",
