@@ -37,6 +37,7 @@ voyage = ["voyageai>=0.2"]
 cohere = ["cohere>=5.0"]
 langchain = ["langchain-core>=0.3"]
 llamaindex = ["llama-index-core>=0.11"]
+langgraph = ["langgraph-checkpoint>=2.0"]
 
 [project.scripts]
 rmbr = "rmbr.__main__:main"
