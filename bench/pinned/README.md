@@ -33,8 +33,14 @@ isn't rmbr's target workload (see README's "Alternatives" section). Every
 engine (rmbr, chromadb, lancedb) is fed identical precomputed vectors for
 identical synthetic documents, isolating storage/ANN engine performance from
 embedding cost — see `bench/run.py`'s module docstring for the full
-methodology. 3 seeds (0, 1, 2), 5,000 synthetic docs, 500 queries, 384-dim
-vectors, k=5.
+methodology. `mem0` is the one exception: it has no public "give me a raw
+vector" API, so its embedder is swapped out for the same precomputed-vector
+lookup *after* construction instead — same vectors, different mechanism (see
+`run_mem0()`'s docstring in `bench/competitors.py`). mem0 is benched with its
+own default hybrid (dense + BM25 sparse) search left on, matching how anyone
+actually gets it by installing it — same reasoning as rmbr's own
+"hybrid, default" row. 3 seeds (0, 1, 2), 5,000 synthetic docs, 500 queries,
+384-dim vectors, k=5.
 
 ```bash
 pip install -e ".[bench]"

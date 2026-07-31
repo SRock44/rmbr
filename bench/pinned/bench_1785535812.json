@@ -1,0 +1,51 @@
+{
+  "config": {
+    "n_docs": 5000,
+    "n_queries": 500,
+    "dim": 384,
+    "k": 5,
+    "seed": 2
+  },
+  "results": [
+    {
+      "name": "rmbr (hybrid, default)",
+      "ingest_seconds": 1.6764794467017055,
+      "docs_per_second": 2982.440381143334,
+      "search_p50_ms": 1.8109900411218405,
+      "search_p95_ms": 2.6404019445180893,
+      "recall_at_k": 0.9488
+    },
+    {
+      "name": "rmbr (vector-only)",
+      "ingest_seconds": 1.6331147071905434,
+      "docs_per_second": 3061.634297937056,
+      "search_p50_ms": 1.6197245568037033,
+      "search_p95_ms": 2.616781275719404,
+      "recall_at_k": 0.95
+    },
+    {
+      "name": "chromadb",
+      "ingest_seconds": 0.6430591279640794,
+      "docs_per_second": 7775.33477493736,
+      "search_p50_ms": 0.39755692705512047,
+      "search_p95_ms": 0.42412709444761276,
+      "recall_at_k": 0.8032
+    },
+    {
+      "name": "lancedb",
+      "ingest_seconds": 0.021176618058234453,
+      "docs_per_second": 236109.46687758612,
+      "search_p50_ms": 2.5100326165556908,
+      "search_p95_ms": 2.7867299504578114,
+      "recall_at_k": 1.0
+    },
+    {
+      "name": "mem0",
+      "ingest_seconds": 11.918997531291097,
+      "docs_per_second": 419.49836694515926,
+      "search_p50_ms": 39.7235588170588,
+      "search_p95_ms": 40.55142309516668,
+      "recall_at_k": 0.998
+    }
+  ]
+}

@@ -31,7 +31,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-bench = ["chromadb", "lancedb"]
+bench = ["chromadb", "lancedb", "mem0ai"]
 openai = ["openai>=1.0"]
 voyage = ["voyageai>=0.2"]
 cohere = ["cohere>=5.0"]
