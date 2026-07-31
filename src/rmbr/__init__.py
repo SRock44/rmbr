@@ -19,5 +19,6 @@ from .index import Index
 from .mcp_server import serve_mcp
 from .memory import Memory
 from .policy import Policy
+from .server import serve_http
 
-__all__ = ["Memory", "Index", "Policy", "serve_mcp"]
+__all__ = ["Memory", "Index", "Policy", "serve_mcp", "serve_http"]
