@@ -29,11 +29,21 @@ from ._engine import (
     save_ann_index,
 )
 from .ann import AnnIndex
-from .chunk import DEFAULT_CHUNK_OVERLAP, DEFAULT_CHUNK_SIZE, split_markdown, split_python, split_text
+from .chunk import (
+    DEFAULT_CHUNK_OVERLAP,
+    DEFAULT_CHUNK_SIZE,
+    split_json,
+    split_markdown,
+    split_python,
+    split_rst,
+    split_text,
+)
 from .embed import Embedder
 from .policy import Policy
-from .search import Hits, hybrid_search
+from .rerank import CrossEncoderReranker
+from .search import DEFAULT_RECENCY_HALF_LIFE_SECONDS, Hits, hybrid_search
 from .store import Store
+from .tools import ToolSpec, index_search_tool
 
 _COLLECTION = "chunks"
 _TEXT_SUFFIXES = {
@@ -47,8 +57,16 @@ _SPLITTERS: dict[str, Splitter] = {
     "text": split_text,
     "markdown": split_markdown,
     "python": split_python,
+    "json": split_json,
+    "rst": split_rst,
 }
-_EXTENSION_SPLITTERS: dict[str, str] = {".md": "markdown", ".markdown": "markdown", ".py": "python"}
+_EXTENSION_SPLITTERS: dict[str, str] = {
+    ".md": "markdown",
+    ".markdown": "markdown",
+    ".py": "python",
+    ".json": "json",
+    ".rst": "rst",
+}
 
 
 def _resolve_splitter(splitter: "str | Splitter") -> Splitter:
@@ -92,6 +110,7 @@ class Index:
         self._embedder = make_embedder(embedder, self._store)
         self._ann = load_ann_index(self._store, _COLLECTION)
         self._alock = asyncio.Lock()
+        self._reranker: CrossEncoderReranker | None = None
 
     def add_text(
         self,
@@ -276,6 +295,10 @@ class Index:
         use_bm25: bool = True,
         use_vectors: bool = True,
         budget_ms: float | None = None,
+        min_similarity: float | None = None,
+        recency_weight: float = 0.0,
+        recency_half_life_seconds: float = DEFAULT_RECENCY_HALF_LIFE_SECONDS,
+        rerank: bool = False,
     ) -> Hits:
         """Hybrid search over indexed chunks. Returns Hits — hits[0].text, hits[0].score, hits.timings.
 
@@ -284,8 +307,27 @@ class Index:
         `use_vectors=False` for pure keyword search.
 
         `where` filters to chunks whose metadata matches every key/value
-        given, e.g. `idx.search(q, where={"source": "docs/deploy.md"})` —
-        equality only in v0.1, no operators.
+        given, e.g. `idx.search(q, where={"source": "docs/deploy.md"})`.
+        A plain value is equality; a `{"$gt": ...}`-style dict is an
+        operator comparison (`$eq`/`$ne`/`$gt`/`$gte`/`$lt`/`$lte`/`$in`/
+        `$nin`) — see `search.hybrid_search`'s docstring for the full set.
+
+        `min_similarity` drops hits below that raw cosine similarity
+        (requires `use_vectors=True`) — a real confidence gate, unlike
+        thresholding on `hit.score` itself.
+
+        `recency_weight` (0.0, off, by default) blends a recency bonus
+        into ranking so a freshly-added chunk can outrank an equally
+        relevant older one — `recency_half_life_seconds` controls how
+        fast that bonus decays (default: a week). A chunk's "created"
+        time is its document's `add_text()`/`add_files()` ingestion time
+        (chunks aren't independently re-added later, so there's no
+        separate per-chunk timestamp to track).
+
+        `rerank=True` re-scores the candidate pool with a local
+        cross-encoder (`rerank.CrossEncoderReranker`, lazily loaded on
+        first use) for higher precision at extra latency; `hit.score`
+        becomes the cross-encoder's score when this is on.
         """
         readable = resolve_readable_namespaces(
             self.policy, self.namespace, namespaces, self._store.list_chunk_namespaces
@@ -303,7 +345,63 @@ class Index:
             where=where,
             budget_ms=budget_ms,
             query_cache=self._store,
+            min_similarity=min_similarity,
+            recency_weight=recency_weight,
+            recency_half_life_seconds=recency_half_life_seconds,
+            record_timestamp=(lambda record: record.added_at) if recency_weight else None,
+            reranker=self._get_reranker() if rerank else None,
         )
+
+    def _get_reranker(self) -> CrossEncoderReranker:
+        if self._reranker is None:
+            self._reranker = CrossEncoderReranker()
+        return self._reranker
+
+    def as_tool(self, *, name: str = "search") -> ToolSpec:
+        """A `ToolSpec` for this Index's `search()` — ready for a hand-rolled
+        agent loop that isn't using MCP.
+
+            tool = idx.as_tool()
+            response = client.messages.create(..., tools=[tool.to_anthropic()])
+            # when the model calls it:
+            result = tool.call(**tool_use_block.input)
+
+        Same search this instance already does — namespace/policy scoping
+        is whatever this `Index` was constructed with, same as every other
+        call on it. `serve_mcp()` exposes the equivalent tool over MCP if
+        you want a subprocess-based client instead of wiring this into
+        your own loop.
+        """
+        return index_search_tool(self, name=name)
+
+    def as_langchain_retriever(self, *, k: int = 5, **search_kwargs: Any) -> Any:
+        """Wrap this Index as a LangChain `BaseRetriever`. Requires `langchain-core`
+        (`pip install langchain-core`, or whatever full LangChain distribution
+        you're already using) — imported lazily, not a hard rmbr dependency.
+
+            retriever = idx.as_langchain_retriever(k=5)
+            retriever.invoke("how do I deploy?")   # -> list[Document]
+
+        Extra `search_kwargs` (`where=`, `min_similarity=`, `rerank=`, ...)
+        are passed straight through to `search()`/`asearch()` on every call.
+        """
+        from .integrations.langchain import as_retriever
+
+        return as_retriever(self, k=k, **search_kwargs)
+
+    def as_llamaindex_retriever(self, *, k: int = 5, **search_kwargs: Any) -> Any:
+        """Wrap this Index as a LlamaIndex `BaseRetriever`. Requires
+        `llama-index-core` — imported lazily, not a hard rmbr dependency.
+
+            retriever = idx.as_llamaindex_retriever(k=5)
+            retriever.retrieve("how do I deploy?")   # -> list[NodeWithScore]
+
+        Extra `search_kwargs` are passed straight through to `search()`/
+        `asearch()` on every call, same as `as_langchain_retriever()`.
+        """
+        from .integrations.llamaindex import as_retriever
+
+        return as_retriever(self, k=k, **search_kwargs)
 
     def delete(self, document_id: int) -> None:
         """Delete a document, its chunks, and their vectors. No-op if it doesn't exist."""

@@ -71,11 +71,11 @@ class OpenAIEmbedder:
     a network call and a cost per uncached text, in exchange for OpenAI's
     embedding quality instead of the local ONNX default's.
 
-    This is one provider, not a library of them, on purpose — see
-    docs/PLAN.md's rationale for keeping the provider list short (~4 max)
-    rather than integrating everything. Voyage and Cohere follow the exact
-    same `Embedder` protocol (`model_name` + `embed()`); write one the same
-    shape as this class if you need one before rmbr ships it.
+    One of three hosted providers rmbr ships, not a library of them, on
+    purpose — see docs/PLAN.md's rationale for keeping the provider list
+    short (~4 max) rather than integrating everything. `VoyageEmbedder`/
+    `CohereEmbedder` below follow the exact same `Embedder` protocol
+    (`model_name` + `embed()`) if you need one of those instead.
     """
 
     def __init__(self, model_name: str = "text-embedding-3-small"):
@@ -94,6 +94,67 @@ class OpenAIEmbedder:
         # defensively rather than assume that's a permanent guarantee.
         ordered = sorted(response.data, key=lambda item: item.index)
         return [np.asarray(item.embedding, dtype=np.float32) for item in ordered]
+
+
+class VoyageEmbedder:
+    """Embeddings via Voyage AI's API. Opt-in — requires `pip install rmbr[voyage]`
+    and a `VOYAGE_API_KEY`. Same tradeoff and the same `Embedder` protocol
+    as `OpenAIEmbedder` — see its docstring for why rmbr keeps this
+    provider list short rather than exhaustive.
+    """
+
+    def __init__(self, model_name: str = "voyage-3", input_type: str | None = None):
+        # Imported lazily, same reasoning as FastEmbedEmbedder.
+        import voyageai
+
+        self.model_name = model_name
+        self.input_type = input_type
+        self._client = voyageai.Client()
+
+    def embed(self, texts: list[str]) -> list[np.ndarray]:
+        if not texts:
+            return []
+        response = self._client.embed(texts, model=self.model_name, input_type=self.input_type)
+        # Voyage's SDK itself trusts response order == request order (its
+        # own EmbeddingsObject.update() just appends in response order,
+        # with no index field to sort by) - same assumption here.
+        return [np.asarray(v, dtype=np.float32) for v in response.embeddings]
+
+
+class CohereEmbedder:
+    """Embeddings via Cohere's API. Opt-in — requires `pip install rmbr[cohere]`
+    and a `CO_API_KEY`. Same tradeoff as `OpenAIEmbedder` — see its
+    docstring for why rmbr keeps this provider list short rather than
+    exhaustive.
+
+    Cohere's API distinguishes embedding a document to store from
+    embedding a query to search with (`input_type`) — rmbr's single
+    `embed()` call has no way to know which one a given batch is for, so
+    one fixed `input_type` applies to every call from a given instance.
+    Default is `"search_document"` (the more common case, since most
+    calls are ingestion, not search); pass `input_type="search_query"` at
+    construction if most of an instance's traffic is query embedding
+    instead.
+    """
+
+    def __init__(self, model_name: str = "embed-english-v3.0", input_type: str = "search_document"):
+        # Imported lazily, same reasoning as FastEmbedEmbedder.
+        import cohere
+
+        self.model_name = model_name
+        self.input_type = input_type
+        self._client = cohere.ClientV2()
+
+    def embed(self, texts: list[str]) -> list[np.ndarray]:
+        if not texts:
+            return []
+        response = self._client.embed(
+            model=self.model_name,
+            texts=texts,
+            input_type=self.input_type,
+            embedding_types=["float"],
+        )
+        return [np.asarray(v, dtype=np.float32) for v in response.embeddings.float_]
 
 
 class FakeEmbedder:

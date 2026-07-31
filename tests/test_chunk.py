@@ -1,4 +1,6 @@
-from rmbr.chunk import split_markdown, split_python, split_text
+import json
+
+from rmbr.chunk import split_json, split_markdown, split_python, split_rst, split_text
 
 
 def test_split_text_short_text_is_one_chunk():
@@ -116,3 +118,82 @@ def test_split_python_splits_oversized_function_further():
     chunks = split_python(text, chunk_size=200, chunk_overlap=20)
     assert len(chunks) > 1
     assert all(c.startswith("# def big") for c in chunks)
+
+
+def test_split_json_object_splits_by_top_level_key():
+    text = '{"name": "rmbr", "version": "0.2.0"}'
+    chunks = split_json(text, chunk_size=800)
+    assert any("# 'name'" in c and "rmbr" in c for c in chunks)
+    assert any("# 'version'" in c and "0.2.0" in c for c in chunks)
+    assert not any("rmbr" in c and "0.2.0" in c for c in chunks)  # separate chunks, not merged
+
+
+def test_split_json_array_splits_by_element():
+    text = '[{"id": 1}, {"id": 2}]'
+    chunks = split_json(text, chunk_size=800)
+    assert any("# [0]" in c and '"id": 1' in c for c in chunks)
+    assert any("# [1]" in c and '"id": 2' in c for c in chunks)
+
+
+def test_split_json_preserves_unicode():
+    text = '{"greeting": "héllo wörld"}'
+    chunks = split_json(text, chunk_size=800)
+    assert any("héllo wörld" in c for c in chunks)
+
+
+def test_split_json_falls_back_to_split_text_on_invalid_json():
+    text = "this is not { valid json"
+    chunks = split_json(text, chunk_size=800)
+    assert chunks == split_text(text, chunk_size=800)
+
+
+def test_split_json_falls_back_on_bare_scalar():
+    text = '"just a string"'
+    chunks = split_json(text, chunk_size=800)
+    assert chunks == split_text(text, chunk_size=800)
+
+
+def test_split_json_falls_back_on_empty_input():
+    assert split_json("") == []
+    assert split_json("   ") == []
+
+
+def test_split_json_splits_oversized_value_further():
+    big_value = "x" * 2000
+    text = json.dumps({"big": big_value})
+    chunks = split_json(text, chunk_size=200, chunk_overlap=20)
+    assert len(chunks) > 1
+    assert all(c.startswith("# 'big'") for c in chunks)
+
+
+def test_split_rst_separates_sections_by_underline_heading():
+    text = "Introduction\n============\n\nSome intro text.\n\nUsage\n=====\n\nSome usage text.\n"
+    chunks = split_rst(text, chunk_size=800)
+    assert any("Introduction" in c and "Some intro text" in c for c in chunks)
+    assert any("Usage" in c and "Some usage text" in c for c in chunks)
+    assert not any("intro text" in c and "usage text" in c for c in chunks)
+
+
+def test_split_rst_keeps_preamble_before_first_heading():
+    text = "A short preamble line.\n\nTitle\n=====\n\nBody text.\n"
+    chunks = split_rst(text, chunk_size=800)
+    assert any("A short preamble line" in c for c in chunks)
+
+
+def test_split_rst_falls_back_to_split_text_when_no_heading_detected():
+    text = "Just some plain prose with no headings at all, spanning a couple sentences."
+    chunks = split_rst(text, chunk_size=800)
+    assert chunks == split_text(text, chunk_size=800)
+
+
+def test_split_rst_does_not_treat_short_underline_as_heading():
+    # Underline shorter than the heading text above it doesn't count -
+    # avoids false positives on a coincidental short punctuation line.
+    text = "A Longer Heading Line\n===\n\nBody text.\n"
+    chunks = split_rst(text, chunk_size=800)
+    assert chunks == split_text(text, chunk_size=800)
+
+
+def test_split_rst_falls_back_on_empty_input():
+    assert split_rst("") == []
+    assert split_rst("   ") == []

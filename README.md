@@ -6,7 +6,7 @@
 
 `rmbr` ("remember", vowels deleted) is an embedded, local-first **memory + retrieval engine for AI agents and LLM apps** — what SQLite is to Postgres, rmbr aims to be to hosted memory services.
 
-> **v0.1.1.** `pip install rmbr` gets you a working library: `Memory`, `Index`, `Policy`, and MCP support (below), all implemented and tested — see [docs/PLAN.md](docs/PLAN.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design.
+> **v0.2.0.** `pip install rmbr` gets you a working library: `Memory`, `Index`, `Policy`, and MCP support (below), all implemented and tested — see [docs/PLAN.md](docs/PLAN.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design.
 
 ## Why
 
@@ -82,7 +82,91 @@ answer("how do I deploy?")
 
 This isn't Claude-specific. `hit.text` is a plain Python string with no wrapper, no provider object, nothing rmbr-proprietary — the exact same `context` string above drops verbatim into OpenAI's `messages` array (`client.chat.completions.create(model=..., messages=[...])`) or Gemini's `contents`. Every mainstream chat-completion API takes the same fundamental shape (a list of role-tagged text messages), which is why "retrieve text, put it in the prompt" — the only integration contract rmbr makes — works identically across providers. Swap the SDK call, nothing else changes.
 
-Want the embedding itself to come from OpenAI instead of the local default? `Memory("agents.db", namespace="assistant", embedder=OpenAIEmbedder())` (`pip install rmbr[openai]`) — same `Embedder` protocol, same rest of the API.
+Want the embedding itself to come from a hosted provider instead of the local default? `Memory("agents.db", namespace="assistant", embedder=OpenAIEmbedder())` (`pip install rmbr[openai]`) — `VoyageEmbedder`/`pip install rmbr[voyage]` and `CohereEmbedder`/`pip install rmbr[cohere]` are also available, all three behind the exact same `Embedder` protocol, same rest of the API.
+
+### Keeping memory accurate over time
+
+`remember()` inserting forever is fine for a while, then it isn't: near-duplicate notes pile up, and nothing ever expires. rmbr doesn't have an LLM to judge "is this the same fact" the way mem0's extraction loop does — everything below is deterministic vector-similarity/time-based engineering instead, opt-in because a false-positive match is a worse failure than a duplicate:
+
+```python
+# Update-in-place instead of appending, above a cosine-similarity threshold.
+# Off by default — no LLM here to judge intent, so keep it conservative (0.92-0.95).
+mem = Memory("agents.db", namespace="assistant", dedupe_threshold=0.93)
+mem.remember("user prefers dark mode")       # inserts
+mem.remember("user really prefers dark mode")  # updates the same row if similarity clears the bar
+
+# Bound growth automatically (evicts the oldest beyond the cap on every remember()),
+# or prune on your own schedule:
+mem = Memory("agents.db", namespace="assistant", max_memories=5000)
+mem.forget_older_than(60 * 60 * 24 * 30)     # delete anything older than 30 days
+```
+
+### Precision knobs for search
+
+`search()`/`recall()` default to plain hybrid ranking, but three things are available when relevance quality matters more than the default:
+
+```python
+# Richer where= filtering: equality by default, $eq/$ne/$gt/$gte/$lt/$lte/$in/$nin as operators.
+idx.search("deploy", where={"updated_at": {"$gt": "2026-01-01"}})
+
+# A real confidence gate — filters on the raw cosine similarity (hit.vector_score),
+# not hit.score itself, which is an RRF rank-sum with no fixed scale to threshold on.
+idx.search("deploy", min_similarity=0.6)
+
+# Recency-weighted ranking: a fresher memory/chunk can outrank an equally
+# relevant older one. recency_weight=0.0 (off) by default. A chunk's "created"
+# time is its document's ingestion time (add_text()/add_files()).
+mem.recall("user preferences", recency_weight=0.05, recency_half_life_seconds=7 * 86400)
+idx.search("deploy", recency_weight=0.05)
+
+# A local cross-encoder re-scores the candidate pool for higher precision at
+# extra latency — same fastembed dependency already installed, no new network
+# call, no API key. hit.score becomes the cross-encoder's score when this is on.
+idx.search("deploy", rerank=True)
+```
+
+### Conversation memory
+
+The most common real agent shape is a chat loop that should remember across turns. `remember_turn()` is a thin convenience over `remember()` for exactly that — `role`/`session_id` land in metadata rather than getting baked into the stored text, so semantic search isn't polluted by a `"user: "` prefix and you can filter or replay by either:
+
+```python
+mem.remember_turn("user", "I prefer dark mode")
+mem.remember_turn("assistant", "Got it, dark mode from now on", session_id="conv-42")
+
+mem.recall("dark mode", where={"role": "user"})       # who said it
+mem.list(where={"session_id": "conv-42"})              # replay one conversation, in order (list(), not recall() — no query needed)
+```
+
+### Wiring into an existing agent loop or framework
+
+Three ways to plug rmbr into whatever's already running your agent, without going through MCP:
+
+```python
+# Raw OpenAI/Anthropic tool-calling — one line to get a ready-made tool
+# definition plus a callable, in either API's shape:
+tool = idx.as_tool()
+response = client.messages.create(..., tools=[tool.to_anthropic()])
+result = tool.call(**tool_use_block.input)          # dispatches to idx.search()
+
+recall_tool, remember_tool = mem.as_tools()          # or as_tools(read_only=True) for recall only
+
+# LangChain — wraps Index as a real BaseRetriever, drops into any chain
+# (pip install langchain-core, or whatever LangChain distribution you're on):
+retriever = idx.as_langchain_retriever(k=5)
+retriever.invoke("how do I deploy?")                 # -> list[Document]
+
+# LlamaIndex — same idea (pip install llama-index-core):
+retriever = idx.as_llamaindex_retriever(k=5)
+retriever.retrieve("how do I deploy?")                # -> list[NodeWithScore]
+```
+
+Both retriever adapters accept the same `search()` keyword arguments (`where=`, `min_similarity=`, `rerank=`, ...) and have async equivalents (`retriever.ainvoke(...)` / `retriever.aretrieve(...)`, backed by `Index.asearch()`). Neither `langchain-core` nor `llama-index-core` is a required rmbr dependency — each adapter imports its target framework lazily, only when you actually call `as_langchain_retriever()`/`as_llamaindex_retriever()`.
+
+`as_tool()`/`as_tools()`'s exported schema isn't limited to `query`/`k` — a calling model can also pass `where`/`min_similarity`/`rerank` on any given call (all optional, so a model that doesn't know about them behaves exactly as before):
+
+```python
+tool.call(query="how do I deploy?", where={"tier": "public"}, min_similarity=0.6, rerank=True)
+```
 
 ### Restricting access between agents
 
@@ -145,7 +229,7 @@ git clone https://github.com/SRock44/rmbr.git
 cd rmbr
 python -m venv .venv && source .venv/bin/activate   # .venv\Scripts\activate on Windows
 pip install --only-binary :all: -e .
-pytest tests/    # 129 tests, no network or API key required
+pytest tests/    # 192 tests, no network or API key required
 ```
 
 The default embedder (`fastembed`, a local ONNX model) downloads its model weights on first use. Every test in `tests/` instead uses `rmbr.embed.FakeEmbedder` — a deterministic, dependency-free embedder — so the suite runs fully offline; you can inject the same `FakeEmbedder` into your own tests via `Memory(..., embedder=FakeEmbedder())` / `Index(..., embedder=FakeEmbedder())`.
@@ -197,6 +281,8 @@ Three tools, all pinned to whatever namespace you pass at startup (see [Multi-ag
 - **`search(query, k=5)`** — hybrid search over documents added via `Index`
 - **`recall(query, k=5)`** — search over notes saved via `Memory`
 - **`remember(text)`** — save a new memory. Not present in the tool list at all — not just permission-denied — when `read_only=True`.
+
+Each result includes `bm25_score`/`vector_score` (the raw signals behind `score`) alongside `text`/`metadata` — useful if the calling agent wants to weight or filter results by confidence rather than trust every hit equally. `min_similarity`, `recency_weight`, and `rerank` (see [Precision knobs for search](#precision-knobs-for-search) above) aren't exposed as MCP tool parameters yet — the tool schemas stay minimal on purpose; configure them at `serve_mcp()`'s call site via a custom `Index`/`Memory` if you need them server-side.
 
 ### Connecting a client
 
@@ -280,9 +366,10 @@ Full data and every candidate's per-category breakdown: `python bench/quality.py
 
 ## Roadmap
 
-- **v0.1 (done in this repo, not yet released to PyPI)** — `Memory` + `Policy` + `Index` (hybrid BM25 + vector search, metadata filtering), embedding + semantic query caches, MCP support (namespace-pinned), 3-OS CI (Linux/Windows/macOS), true batch ingestion with per-stage timings, async API surface (`a`-prefixed methods), a Python-aware chunker (stdlib `ast`, no added dependency), one hosted embedding provider (OpenAI), a 150-example quality eval that confirmed the default embedder against local alternatives, real single-call and bulk benchmark numbers, PyPI trusted publishing
-- **Known gaps** — Voyage/Cohere embedding providers (same `Embedder` protocol as `OpenAIEmbedder`, not yet written), more auto-detected chunkers (currently text/markdown/python)
-- **Next** — cut the v0.1.0 release
+- **v0.1** — `Memory` + `Policy` + `Index` (hybrid BM25 + vector search, metadata filtering), embedding + semantic query caches, MCP support (namespace-pinned), 3-OS CI (Linux/Windows/macOS), true batch ingestion with per-stage timings, async API surface (`a`-prefixed methods), a Python-aware chunker (stdlib `ast`, no added dependency), one hosted embedding provider (OpenAI), a 150-example quality eval that confirmed the default embedder against local alternatives, real single-call and bulk benchmark numbers, PyPI trusted publishing, a `uvx`-launchable console script, and a listing on the [official MCP registry](https://registry.modelcontextprotocol.io)
+- **v0.2** — similarity-based memory dedupe/update (`dedupe_threshold`), bounded retention (`max_memories`, `forget_older_than`), recency-weighted ranking for both `Memory.recall()` and `Index.search()`, richer `where=` filtering (`$gt`/`$gte`/`$lt`/`$lte`/`$in`/`$nin`/`$ne`, not just equality, now also usable on `Memory.list()`), a real confidence gate on raw cosine similarity (`min_similarity`, plus `hit.bm25_score`/`hit.vector_score` on every result), an optional local cross-encoder reranker (`rerank=True`), a conversation-memory convenience (`remember_turn()`), tool-calling export for hand-rolled agent loops (`as_tool()`/`as_tools()`, OpenAI- and Anthropic-shaped, exposing the full `where`/`min_similarity`/`rerank` knob set — not just `query`/`k`), LangChain/LlamaIndex retriever adapters (`as_langchain_retriever()`/`as_llamaindex_retriever()`, both optional/lazy-imported), two more hosted embedding providers (`VoyageEmbedder`, `CohereEmbedder` — same `Embedder` protocol as `OpenAIEmbedder`), and two more auto-detected chunkers (`split_json`, `split_rst`, both stdlib-only)
+- **Known gaps** — none carried over from v0.1's list; nothing new opened yet
+- **Next** — a pluggable consolidation hook (`mem.consolidate(extractor)`): rmbr still never calls an LLM itself, but a caller-supplied extractor callable would let rmbr orchestrate mem0-style fact extraction/dedup/update against your own model choice, without rmbr owning an API key. Design in progress, not yet built.
 
 ## License
 

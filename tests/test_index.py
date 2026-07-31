@@ -344,3 +344,60 @@ def test_async_concurrent_calls_on_same_index_do_not_error(tmp_path):
 
     hits = asyncio.run(run())
     assert len(hits) == 3
+
+
+def test_search_where_operator_filters_by_range(tmp_path):
+    db = tmp_path / "agents.db"
+    idx = make_index(db)
+    idx.add_text("release notes", metadata={"price": 5})
+    idx.add_text("release notes", metadata={"price": 15})
+
+    hits = idx.search("release notes", where={"price": {"$gt": 10}})
+    assert len(hits) == 1
+    assert hits[0].metadata["price"] == 15
+
+
+def test_search_min_similarity_drops_weak_matches(tmp_path):
+    db = tmp_path / "agents.db"
+    idx = make_index(db)
+    idx.add_text("quarterly revenue report")
+
+    all_hits = idx.search("quarterly revenue report")
+    real_similarity = all_hits[0].vector_score
+
+    filtered = idx.search("quarterly revenue report", min_similarity=real_similarity + 0.5)
+    assert len(filtered) == 0
+
+
+def test_search_rerank_uses_cross_encoder_score(tmp_path):
+    db = tmp_path / "agents.db"
+    idx = make_index(db)
+    idx.add_text("the weak match")
+    idx.add_text("the strong match")
+
+    class TextKeyedReranker:
+        model_name = "fake-reranker"
+
+        def rerank(self, query, documents):
+            return [1.0 if doc == "the strong match" else 0.0 for doc in documents]
+
+    idx._reranker = TextKeyedReranker()
+    hits = idx.search("match", rerank=True, k=2)
+
+    assert hits[0].text == "the strong match"
+    assert hits[0].score == 1.0
+
+
+def test_search_recency_weight_favors_newer_chunk(tmp_path):
+    db = tmp_path / "agents.db"
+    idx = make_index(db)
+    old_doc_id = idx.add_text("status update")
+    new_doc_id = idx.add_text("status update")
+
+    old_ts = "2000-01-01T00:00:00+00:00"
+    idx._store.conn.execute("UPDATE documents SET added_at = ? WHERE id = ?", (old_ts, old_doc_id))
+    idx._store.conn.commit()
+
+    hits = idx.search("status update", recency_weight=1.0, recency_half_life_seconds=3600)
+    newer_chunk_ids = set(idx._store.get_chunk_ids_for_document(new_doc_id))
+    assert hits[0].id in newer_chunk_ids

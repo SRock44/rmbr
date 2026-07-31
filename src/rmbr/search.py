@@ -28,12 +28,14 @@ import hashlib
 import json
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, Callable
 
 import numpy as np
 
 from .ann import AnnIndex
 from .embed import CachingEmbedder
+from .rerank import Reranker
 from .store import ScoredId
 
 if TYPE_CHECKING:
@@ -43,6 +45,7 @@ _RRF_K = 60  # standard reciprocal-rank-fusion constant; dampens the impact of r
 DEFAULT_OVERSAMPLE = 4
 DEFAULT_CACHE_TTL_SECONDS = 300.0
 DEFAULT_CACHE_THRESHOLD = 0.95
+DEFAULT_RECENCY_HALF_LIFE_SECONDS = 7 * 24 * 3600.0  # a week: a memory this old carries half the boost of a new one
 
 
 @dataclass
@@ -52,6 +55,16 @@ class Hit:
     score: float
     metadata: dict[str, Any]
     namespace: str
+    # Raw component signals behind `score`, when available — `score` itself
+    # is whatever determined final order (RRF-fused by default, or the
+    # cross-encoder's relevance score when `rerank=True`), which isn't
+    # calibrated to any absolute scale you can threshold on. `vector_score`
+    # (raw cosine similarity, 0..1-ish) is: that's what `min_similarity`
+    # actually filters on. `bm25_score` is FTS5's raw bm25() value (more
+    # negative = more relevant) for whichever hits the keyword stage found.
+    # Either is None when that hit didn't come from that stage.
+    bm25_score: float | None = None
+    vector_score: float | None = None
 
 
 class Hits(list):
@@ -84,6 +97,11 @@ def hybrid_search(
     query_cache: "Store | None" = None,
     cache_ttl_seconds: float = DEFAULT_CACHE_TTL_SECONDS,
     cache_threshold: float = DEFAULT_CACHE_THRESHOLD,
+    min_similarity: float | None = None,
+    recency_weight: float = 0.0,
+    recency_half_life_seconds: float = DEFAULT_RECENCY_HALF_LIFE_SECONDS,
+    record_timestamp: Callable[[Any], str] | None = None,
+    reranker: Reranker | None = None,
 ) -> Hits:
     """Search one collection (chunks or memories) and return ranked Hits.
 
@@ -98,18 +116,49 @@ def hybrid_search(
     intermediate states, and RRF fusion only kicks in when both run.
 
     ``where`` filters results to records whose metadata matches every
-    key/value pair given (equality only, like ``{"category": "docs"}`` —
-    no operators in v0.1). Applied as a post-filter on the same candidate
-    pool BM25/ANN already returned rather than pushed into SQL, so it
-    shares the same oversample-then-filter tradeoff as namespace
-    filtering below: a filter that's very selective against a large
-    candidate pool can return fewer than ``k`` hits.
+    key/value pair given. A plain value is equality (``{"category": "docs"}``);
+    a dict of one or more ``$op`` keys is an operator comparison
+    (``{"price": {"$gt": 10}}``, ``{"tag": {"$in": ["a", "b"]}}``) — see
+    ``_WHERE_OPERATORS`` for the full set. Applied as a post-filter on the
+    same candidate pool BM25/ANN already returned rather than pushed into
+    SQL, so it shares the same oversample-then-filter tradeoff as
+    namespace filtering below: a filter that's very selective against a
+    large candidate pool can return fewer than ``k`` hits.
+
+    ``min_similarity`` drops any hit whose raw cosine similarity
+    (``Hit.vector_score``) is below the threshold — including hits that
+    only came from BM25 and have no vector_score at all, since there's no
+    similarity evidence to vouch for them. Requires ``use_vectors=True``
+    (raises ``ValueError`` otherwise, rather than silently returning
+    nothing). Deliberately gates on the raw cosine number, not
+    ``Hit.score`` — the fused RRF score is a rank-sum with no fixed scale,
+    not a confidence you can sensibly threshold on.
+
+    ``recency_weight`` (0.0, off, by default) blends a recency bonus into
+    the fusion score: ``0.5 ** (age / recency_half_life_seconds)``, so a
+    record right at the half-life is worth half what a brand-new one is.
+    Requires ``record_timestamp`` (a ``record -> ISO-8601 string``
+    extractor) since not every collection carries a timestamp per record —
+    `Memory.recall()` wires this in; `Index.search()` doesn't yet, since
+    chunks aren't individually timestamped.
+
+    ``reranker`` (a `rerank.Reranker`, e.g. `rerank.CrossEncoderReranker`),
+    if given, re-scores the whole candidate pool (not just the top ``k``
+    BM25/ANN already picked) by running a local cross-encoder over
+    ``(query, candidate_text)`` pairs, and ``Hit.score`` becomes that
+    cross-encoder score rather than the RRF-fused one — it's what actually
+    determined the final order.
 
     If ``budget_ms`` is set and time runs out before the vector stage
     (query embedding + ANN search) would start, that stage is skipped and
     results fall back to BM25-only ranking. ``hits.degraded`` is True when
     this happened, so callers can log or surface it.
     """
+    if min_similarity is not None and not use_vectors:
+        raise ValueError("min_similarity requires use_vectors=True — there's no similarity to filter on otherwise")
+    if recency_weight and record_timestamp is None:
+        raise ValueError("recency_weight requires record_timestamp (a record -> created_at extractor)")
+
     timings: dict[str, float] = {}
     start = time.perf_counter()
 
@@ -122,10 +171,24 @@ def hybrid_search(
     want_vectors = use_vectors and ann_index is not None and embedder is not None and len(ann_index) > 0
     want_cache = want_vectors and query_cache is not None
     query_vector: np.ndarray | None = None
-    # `where` is folded into the cache scope so a cached unfiltered result
-    # can never be handed back for a filtered query (or vice versa) - a
-    # correctness requirement, not an optimization.
-    cache_scope = ",".join(sorted(namespaces)) + "|" + json.dumps(where, sort_keys=True)
+    # `where`/`min_similarity`/recency/rerank are folded into the cache
+    # scope so a cached result computed under different filtering or
+    # ranking rules can never be handed back for this call - a correctness
+    # requirement, not an optimization.
+    cache_scope = (
+        ",".join(sorted(namespaces))
+        + "|"
+        + json.dumps(
+            {
+                "where": where,
+                "min_similarity": min_similarity,
+                "recency_weight": recency_weight,
+                "recency_half_life_seconds": recency_half_life_seconds if recency_weight else None,
+                "reranker": getattr(reranker, "model_name", "custom") if reranker is not None else None,
+            },
+            sort_keys=True,
+        )
+    )
 
     if (want_vectors or want_cache) and not over_budget():
         t0 = time.perf_counter()
@@ -163,7 +226,7 @@ def hybrid_search(
     records_by_id = {r.id: r for r in fetch_records(list(candidate_ids))}
     if where:
         records_by_id = {
-            id_: record for id_, record in records_by_id.items() if _matches_where(record.metadata, where)
+            id_: record for id_, record in records_by_id.items() if matches_where(record.metadata, where)
         }
 
     # ANN has no notion of namespace or metadata, so filter its hits
@@ -178,18 +241,55 @@ def hybrid_search(
         if id_ in records_by_id and records_by_id[id_].namespace in namespaces
     ]
 
-    fused = _reciprocal_rank_fusion(bm25_hits, ann_hits, k)
-    hits = Hits(
+    bm25_scores = {hit.id: hit.raw_score for hit in bm25_hits if hit.id in records_by_id}
+    vector_scores = {id_: sim for id_, sim in ann_hits}
+
+    recency_scores: dict[int, float] | None = None
+    if recency_weight and record_timestamp is not None:
+        now = time.time()
+        recency_scores = {
+            id_: _recency_factor(record_timestamp(record), now, recency_half_life_seconds)
+            for id_, record in records_by_id.items()
+        }
+
+    # Fuse the *whole* candidate pool, not just the top k - identical to
+    # the old behavior when nothing reranks (sorting once and slicing to k
+    # is the same result as sorting to k directly), but a reranker needs
+    # the full pool to have anything to fix.
+    fused_pool = _reciprocal_rank_fusion(
+        bm25_hits,
+        ann_hits,
+        len(candidate_ids) or 1,
+        recency_scores=recency_scores,
+        recency_weight=recency_weight,
+    )
+    fused_pool = [(id_, score) for id_, score in fused_pool if id_ in records_by_id]
+
+    if reranker is not None and fused_pool:
+        rerank_t0 = time.perf_counter()
+        ordered_ids = [id_ for id_, _ in fused_pool]
+        rerank_scores = reranker.rerank(query, [records_by_id[id_].text for id_ in ordered_ids])
+        fused = sorted(zip(ordered_ids, rerank_scores), key=lambda pair: pair[1], reverse=True)[:k]
+        timings["rerank_ms"] = _ms_since(rerank_t0)
+    else:
+        fused = fused_pool[:k]
+
+    hit_list = [
         Hit(
             id=id_,
             text=records_by_id[id_].text,
             score=score,
             metadata=records_by_id[id_].metadata,
             namespace=records_by_id[id_].namespace,
+            bm25_score=bm25_scores.get(id_),
+            vector_score=vector_scores.get(id_),
         )
         for id_, score in fused
-        if id_ in records_by_id
-    )
+    ]
+    if min_similarity is not None:
+        hit_list = [h for h in hit_list if h.vector_score is not None and h.vector_score >= min_similarity]
+
+    hits = Hits(hit_list)
     timings["fusion_ms"] = _ms_since(t0)
     timings["total_ms"] = (time.perf_counter() - start) * 1000
     hits.timings = timings
@@ -202,20 +302,30 @@ def hybrid_search(
 
 
 def _reciprocal_rank_fusion(
-    bm25_hits: list[ScoredId], ann_hits: list[tuple[int, float]], k: int
+    bm25_hits: list[ScoredId],
+    ann_hits: list[tuple[int, float]],
+    k: int,
+    *,
+    recency_scores: dict[int, float] | None = None,
+    recency_weight: float = 0.0,
 ) -> list[tuple[int, float]]:
     """Merge two ranked lists by reciprocal rank, not raw score.
 
     BM25 scores and cosine similarities live on incomparable scales, so we
     can't just add them. RRF sidesteps that: each list only contributes
     "how highly did you rank this", and the sum across lists rewards items
-    both signals agree on.
+    both signals agree on. `recency_weight`/`recency_scores`, when given,
+    add a third additive term on top — same trick, just with "how recent"
+    standing in for "how highly ranked".
     """
     scores: dict[int, float] = {}
     for rank, hit in enumerate(bm25_hits):
         scores[hit.id] = scores.get(hit.id, 0.0) + 1.0 / (_RRF_K + rank + 1)
     for rank, (id_, _similarity) in enumerate(ann_hits):
         scores[id_] = scores.get(id_, 0.0) + 1.0 / (_RRF_K + rank + 1)
+    if recency_weight and recency_scores:
+        for id_ in scores:
+            scores[id_] += recency_weight * recency_scores.get(id_, 0.0)
     return sorted(scores.items(), key=lambda pair: pair[1], reverse=True)[:k]
 
 
@@ -253,7 +363,15 @@ def _write_query_cache(
         {
             "k": k,
             "hits": [
-                {"id": h.id, "text": h.text, "score": h.score, "metadata": h.metadata, "namespace": h.namespace}
+                {
+                    "id": h.id,
+                    "text": h.text,
+                    "score": h.score,
+                    "metadata": h.metadata,
+                    "namespace": h.namespace,
+                    "bm25_score": h.bm25_score,
+                    "vector_score": h.vector_score,
+                }
                 for h in hits
             ],
         }
@@ -263,8 +381,46 @@ def _write_query_cache(
     )
 
 
-def _matches_where(metadata: dict[str, Any], where: dict[str, Any]) -> bool:
-    return all(metadata.get(key) == value for key, value in where.items())
+_WHERE_OPERATORS: dict[str, Callable[[Any, Any], bool]] = {
+    "$eq": lambda field, value: field == value,
+    "$ne": lambda field, value: field != value,
+    "$gt": lambda field, value: field is not None and field > value,
+    "$gte": lambda field, value: field is not None and field >= value,
+    "$lt": lambda field, value: field is not None and field < value,
+    "$lte": lambda field, value: field is not None and field <= value,
+    "$in": lambda field, value: field in value,
+    "$nin": lambda field, value: field not in value,
+}
+
+
+def matches_where(metadata: dict[str, Any], where: dict[str, Any]) -> bool:
+    """Equality by default (`{"category": "docs"}`); `$op` dicts for the rest.
+
+    A missing field or a type mismatch (comparing None against a number,
+    say) is treated as "doesn't match" rather than raising - a filter that
+    can't be evaluated for a given record shouldn't crash the whole search.
+    """
+    for key, expected in where.items():
+        field = metadata.get(key)
+        if isinstance(expected, dict) and expected and all(isinstance(k, str) and k.startswith("$") for k in expected):
+            for op, operand in expected.items():
+                if op not in _WHERE_OPERATORS:
+                    raise ValueError(f"Unsupported where operator {op!r}; choose one of {sorted(_WHERE_OPERATORS)}")
+                try:
+                    if not _WHERE_OPERATORS[op](field, operand):
+                        return False
+                except TypeError:
+                    return False
+        elif field != expected:
+            return False
+    return True
+
+
+def _recency_factor(created_at: str, now: float, half_life_seconds: float) -> float:
+    if half_life_seconds <= 0:
+        return 0.0
+    age_seconds = max(0.0, now - datetime.fromisoformat(created_at).timestamp())
+    return 0.5 ** (age_seconds / half_life_seconds)
 
 
 def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
