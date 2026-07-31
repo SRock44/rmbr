@@ -309,9 +309,11 @@ Three tools, all pinned to whatever namespace you pass at startup (see [Multi-ag
 
 - **`search(query, k=5)`** — hybrid search over documents added via `Index`
 - **`recall(query, k=5)`** — search over notes saved via `Memory`
-- **`remember(text)`** — save a new memory. Not present in the tool list at all — not just permission-denied — when `read_only=True`.
+- **`remember(text, pinned=False)`** — save a new memory; `pinned=True` exempts it from `max_memories` eviction. Not present in the tool list at all — not just permission-denied — when `read_only=True`.
 
 Each result includes `bm25_score`/`vector_score` (the raw signals behind `score`) alongside `text`/`metadata` — useful if the calling agent wants to weight or filter results by confidence rather than trust every hit equally. `min_similarity`, `recency_weight`, and `rerank` (see [Precision knobs for search](#precision-knobs-for-search) above) aren't exposed as MCP tool parameters yet — the tool schemas stay minimal on purpose; configure them at `serve_mcp()`'s call site via a custom `Index`/`Memory` if you need them server-side.
+
+Also exposed: an MCP **resource template**, `rmbr://examples/{pattern}` (plus `rmbr://examples` listing the valid `pattern` values), serving short, runnable code snippets for common usage patterns — `basic-memory`, `document-search`, `multi-agent-policy`, `conversation-memory`, `tool-calling`, `memory-hygiene`. Any MCP client that can browse resources (not just call tools) can pull these up directly, without leaving the session or going to GitHub.
 
 ### Connecting a client
 
