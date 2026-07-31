@@ -268,6 +268,8 @@ flowchart TB
 
 The coder and researcher namespaces have no path between them on this diagram — that's the point, not an omission. Nothing needed to be configured to deny that access; only the supervisor's grant (`read="*"`) is explicit. The external MCP client's tool schema has no `namespace` argument at all, so it structurally cannot ask for anything outside `coder`, no matter what a document it's summarizing tells it to try.
 
+See [`examples/multi_agent_support/`](examples/multi_agent_support/) for this pattern as a runnable end-to-end demo — three Claude-powered agents (two isolated specialists + a supervisor) sharing one `.db` file, including a live `PermissionError` when isolation is tested directly against the API.
+
 ## MCP support
 
 [MCP](https://modelcontextprotocol.io) (Model Context Protocol) is an open, model-agnostic protocol for connecting AI applications — Claude Desktop, Claude Code, Cursor, and a growing list of others — to external tools and data sources through one standard interface, instead of every app inventing its own plugin format. rmbr speaks MCP so any MCP-capable client can search and remember through your `.db` file directly, without you writing a server yourself.
