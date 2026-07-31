@@ -1,6 +1,9 @@
+import pytest
+
 from rmbr.embed import FakeEmbedder
 from rmbr.index import Index
 from rmbr.memory import Memory
+from rmbr.tools import ToolCallError
 
 
 def make_index(path, **kwargs):
@@ -114,3 +117,78 @@ def test_memory_as_tools_recall_call_forwards_where(tmp_path):
     results = recall_tool.call(query="dark mode", where={"category": "preference"})
     assert len(results) == 1
     assert results[0]["metadata"]["category"] == "preference"
+
+
+def test_tool_call_rejects_unexpected_argument_without_crashing(tmp_path):
+    idx = make_index(tmp_path / "agents.db")
+    idx.add_text("some document")
+    tool = idx.as_tool()
+
+    with pytest.raises(ToolCallError, match=r"unexpected argument.*'bogus_arg'"):
+        tool.call(query="some document", bogus_arg="oops")
+
+
+def test_tool_call_error_names_valid_arguments(tmp_path):
+    idx = make_index(tmp_path / "agents.db")
+    tool = idx.as_tool()
+
+    with pytest.raises(ToolCallError, match="query"):
+        tool.call(query="x", made_up="y")
+
+
+def test_tool_call_rejects_missing_required_argument(tmp_path):
+    idx = make_index(tmp_path / "agents.db")
+    tool = idx.as_tool()
+
+    with pytest.raises(ToolCallError, match="missing required"):
+        tool.call()
+
+
+def test_tool_call_error_is_a_type_error_for_backward_compatible_catching(tmp_path):
+    idx = make_index(tmp_path / "agents.db")
+    tool = idx.as_tool()
+
+    with pytest.raises(TypeError):
+        tool.call(query="x", bogus_arg="y")
+
+
+def test_built_in_schemas_set_additional_properties_false(tmp_path):
+    idx = make_index(tmp_path / "agents.db")
+    mem = make_memory(tmp_path / "agents.db")
+
+    for tool in [idx.as_tool(), *mem.as_tools()]:
+        assert tool.parameters.get("additionalProperties") is False
+
+
+def test_to_anthropic_strict_adds_top_level_strict_field(tmp_path):
+    idx = make_index(tmp_path / "agents.db")
+    tool = idx.as_tool()
+
+    assert "strict" not in tool.to_anthropic()
+    assert tool.to_anthropic(strict=True)["strict"] is True
+
+
+def test_to_openai_strict_adds_strict_field_inside_function(tmp_path):
+    idx = make_index(tmp_path / "agents.db")
+    tool = idx.as_tool()
+
+    assert "strict" not in tool.to_openai()["function"]
+    assert tool.to_openai(strict=True)["function"]["strict"] is True
+
+
+def test_memory_as_tools_remember_schema_exposes_pinned(tmp_path):
+    mem = make_memory(tmp_path / "agents.db")
+    remember_tool = next(t for t in mem.as_tools() if t.name == "remember")
+    assert "pinned" in remember_tool.to_openai()["function"]["parameters"]["properties"]
+
+
+def test_memory_as_tools_remember_call_forwards_pinned(tmp_path):
+    mem = make_memory(tmp_path / "agents.db", max_memories=1)
+    tools = {t.name: t for t in mem.as_tools()}
+
+    tools["remember"].call(text="critical fact", pinned=True)
+    tools["remember"].call(text="second fact")
+    tools["remember"].call(text="third fact")
+
+    texts = {m.text for m in mem.list()}
+    assert "critical fact" in texts

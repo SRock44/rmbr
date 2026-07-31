@@ -401,3 +401,64 @@ def test_search_recency_weight_favors_newer_chunk(tmp_path):
     hits = idx.search("status update", recency_weight=1.0, recency_half_life_seconds=3600)
     newer_chunk_ids = set(idx._store.get_chunk_ids_for_document(new_doc_id))
     assert hits[0].id in newer_chunk_ids
+
+
+def test_stats_reports_document_and_chunk_counts_for_own_namespace(tmp_path):
+    db = tmp_path / "agents.db"
+    idx = make_index(db, namespace="researcher")
+    idx.add_text("first document")
+    idx.add_text("second document")
+
+    stats = idx.stats()
+    assert stats["researcher"]["documents"] == 2
+    assert stats["researcher"]["chunks"] == 2
+    assert stats["researcher"]["oldest"] <= stats["researcher"]["newest"]
+
+
+def test_stats_wildcard_respects_policy(tmp_path):
+    db = tmp_path / "agents.db"
+    make_index(db, namespace="coder").add_text("coder doc")
+    make_index(db, namespace="researcher").add_text("researcher doc")
+
+    policy = Policy()
+    policy.allow("supervisor", read="*")
+    supervisor = make_index(db, namespace="supervisor", policy=policy)
+
+    stats = supervisor.stats(namespaces="*")
+    assert stats["coder"]["documents"] == 1
+    assert stats["researcher"]["documents"] == 1
+
+
+def test_stats_explicit_cross_namespace_denied_by_default(tmp_path):
+    db = tmp_path / "agents.db"
+    make_index(db, namespace="researcher").add_text("doc")
+    coder = make_index(db, namespace="coder")
+
+    with pytest.raises(PermissionError):
+        coder.stats(namespaces="researcher")
+
+
+def test_integrity_check_reports_no_problems_on_a_healthy_index(tmp_path):
+    db = tmp_path / "agents.db"
+    idx = make_index(db)
+    idx.add_text("first")
+    idx.add_text("second")
+
+    assert idx.integrity_check() == []
+
+
+def test_integrity_check_flags_a_chunk_with_no_vector(tmp_path):
+    db = tmp_path / "agents.db"
+    idx = make_index(db, namespace="researcher")
+    doc_id = idx.add_text("first")
+    # Simulate corruption: a chunk row exists in SQLite with no
+    # corresponding vector, bypassing rmbr's own write path entirely.
+    idx._store.conn.execute(
+        "INSERT INTO chunks(document_id, namespace, text, metadata, chunk_index) VALUES (?, ?, ?, ?, ?)",
+        (doc_id, "researcher", "orphaned chunk", "{}", 99),
+    )
+    idx._store.conn.commit()
+
+    problems = idx.integrity_check()
+    assert len(problems) == 1
+    assert "no vector" in problems[0]

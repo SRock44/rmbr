@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ._engine import (
+    check_ann_consistency,
     load_ann_index,
     make_embedder,
     resolve_readable_namespaces,
@@ -70,6 +71,7 @@ class Memory:
         metadata: dict[str, Any] | None = None,
         namespace: str | None = None,
         dedupe_threshold: float | None = _UNSET,  # type: ignore[assignment]
+        pinned: bool = False,
     ) -> int:
         """Save a memory. Returns its id (pass it to `forget()` later if needed).
 
@@ -86,10 +88,20 @@ class Memory:
         your agent, which is why it's opt-in rather than a default. A
         good starting point is 0.92-0.95; there's no LLM here to judge
         intent, only vector similarity, so keep it conservative.
+
+        `pinned=True` protects this memory from `max_memories` eviction
+        (see `Memory(...)`) regardless of how old it gets — eviction is
+        otherwise pure recency, which is a real risk once you actually
+        rely on it: a trivial fact from an hour ago would otherwise
+        outlive a critical one from last week for no reason but
+        timestamp. Stored as `metadata["_pinned"]`, so `where={"_pinned":
+        True}` also finds pinned memories via `recall()`/`list()`.
         """
         target_namespace = resolve_writable_namespace(self.policy, self.namespace, namespace)
         threshold = self._default_dedupe_threshold if dedupe_threshold is _UNSET else dedupe_threshold
         vector = self._embedder.embed_one(text)
+        if pinned:
+            metadata = {**(metadata or {}), "_pinned": True}
 
         with self._store.transaction():
             existing_id = None
@@ -316,6 +328,28 @@ class Memory:
             if limit is not None:
                 records = records[:limit]
         return records
+
+    def stats(self, namespaces: str | list[str] | None = None) -> dict[str, dict[str, Any]]:
+        """Counts and time range per namespace — `{namespace: {count, oldest, newest}}`.
+
+        Same `namespaces=` semantics as `recall()` (default: just this
+        handle's own namespace; `"*"` for every namespace the policy lets
+        it read; an explicit name/list is policy-checked). Useful for a
+        health-check endpoint, or just answering "how much has this agent
+        actually remembered" without hand-writing SQL.
+        """
+        readable = resolve_readable_namespaces(
+            self.policy, self.namespace, namespaces, self._store.list_memory_namespaces
+        )
+        return {ns: self._store.memory_stats(ns) for ns in readable}
+
+    def integrity_check(self) -> list[str]:
+        """Verify the vector index and the SQLite table agree on which
+        memories exist, across every namespace in the file. Returns a list
+        of problems (empty means healthy) — see `_engine.check_ann_consistency`
+        for what a mismatch would actually mean and why it'd be surprising.
+        """
+        return check_ann_consistency(self._ann, self._store.all_memory_ids())
 
     def close(self) -> None:
         self._store.close()

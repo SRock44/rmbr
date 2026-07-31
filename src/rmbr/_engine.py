@@ -69,3 +69,28 @@ def resolve_writable_namespace(policy: Policy, who: str, target: str | None) -> 
     if not policy.can_write(who, target):
         raise PermissionError(f"{who!r} is not allowed to write to namespace {target!r}")
     return target
+
+
+def check_ann_consistency(ann: AnnIndex | None, expected_ids: list[int]) -> list[str]:
+    """Compare a vector index's ids against the SQLite table's ids for the
+    same collection. Returns human-readable problems, empty if healthy.
+
+    The two are kept in sync by every write path (`remember`/`add_text`/
+    `forget`/`delete`, all inside one `Store.transaction()`), so a mismatch
+    here means something touched the file outside rmbr's own code - manual
+    SQL, a crash mid-write, a bug - not something that happens in normal
+    use. This is a diagnostic over ids only; it never reads memory/chunk
+    content, so it isn't policy-gated the way `recall()`/`search()` are.
+    """
+    ann_ids = set(ann.ids()) if ann is not None else set()
+    expected = set(expected_ids)
+    problems = []
+    missing_vectors = expected - ann_ids
+    orphaned_vectors = ann_ids - expected
+    if missing_vectors:
+        sample = sorted(missing_vectors)[:10]
+        problems.append(f"{len(missing_vectors)} row(s) have no vector in the index: {sample}")
+    if orphaned_vectors:
+        sample = sorted(orphaned_vectors)[:10]
+        problems.append(f"{len(orphaned_vectors)} vector(s) in the index have no matching row: {sample}")
+    return problems

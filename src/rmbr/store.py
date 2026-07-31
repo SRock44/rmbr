@@ -312,6 +312,28 @@ class Store:
         rows = self.conn.execute("SELECT DISTINCT namespace FROM chunks").fetchall()
         return [row["namespace"] for row in rows]
 
+    def chunk_stats(self, namespace: str) -> dict[str, Any]:
+        doc_row = self.conn.execute(
+            "SELECT COUNT(*) AS documents, MIN(added_at) AS oldest, MAX(added_at) AS newest "
+            "FROM documents WHERE namespace = ?",
+            (namespace,),
+        ).fetchone()
+        chunk_row = self.conn.execute(
+            "SELECT COUNT(*) AS chunks FROM chunks WHERE namespace = ?", (namespace,)
+        ).fetchone()
+        return {
+            "namespace": namespace,
+            "documents": doc_row["documents"],
+            "chunks": chunk_row["chunks"],
+            "oldest": doc_row["oldest"],
+            "newest": doc_row["newest"],
+        }
+
+    def all_chunk_ids(self) -> list[int]:
+        """Every chunk id in the file, across every namespace - for `integrity_check()`."""
+        rows = self.conn.execute("SELECT id FROM chunks").fetchall()
+        return [row["id"] for row in rows]
+
     # -- memories ------------------------------------------------------------
 
     def insert_memory(
@@ -382,12 +404,22 @@ class Store:
         return ids
 
     def delete_oldest_memories_beyond(self, namespace: str, keep: int) -> list[int]:
-        """Delete all but the `keep` most recent memories in `namespace`. Returns the deleted ids."""
+        """Delete the oldest, unpinned memories in `namespace` beyond `keep`.
+
+        A memory pinned via `remember(..., pinned=True)` (stored as
+        `metadata["_pinned"]`) is never counted against `keep` and never
+        evicted here, regardless of age - only unpinned memories are
+        trimmed to the `keep` most recent. Filtering happens in Python,
+        not SQL, matching `where=`'s filtering elsewhere in rmbr rather
+        than adding a SQLite JSON1 dependency for one query. Returns the
+        deleted ids.
+        """
         rows = self.conn.execute(
-            "SELECT id FROM memories WHERE namespace = ? ORDER BY created_at DESC LIMIT -1 OFFSET ?",
-            (namespace, keep),
+            "SELECT id, metadata FROM memories WHERE namespace = ? ORDER BY created_at DESC",
+            (namespace,),
         ).fetchall()
-        ids = [row["id"] for row in rows]
+        unpinned_ids = [row["id"] for row in rows if not json.loads(row["metadata"]).get("_pinned")]
+        ids = unpinned_ids[keep:]
         if ids:
             placeholders = ",".join("?" * len(ids))
             self.conn.execute(f"DELETE FROM memories WHERE id IN ({placeholders})", ids)
@@ -402,6 +434,24 @@ class Store:
     def list_memory_namespaces(self) -> list[str]:
         rows = self.conn.execute("SELECT DISTINCT namespace FROM memories").fetchall()
         return [row["namespace"] for row in rows]
+
+    def memory_stats(self, namespace: str) -> dict[str, Any]:
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS count, MIN(created_at) AS oldest, MAX(created_at) AS newest "
+            "FROM memories WHERE namespace = ?",
+            (namespace,),
+        ).fetchone()
+        return {
+            "namespace": namespace,
+            "count": row["count"],
+            "oldest": row["oldest"],
+            "newest": row["newest"],
+        }
+
+    def all_memory_ids(self) -> list[int]:
+        """Every memory id in the file, across every namespace - for `integrity_check()`."""
+        rows = self.conn.execute("SELECT id FROM memories").fetchall()
+        return [row["id"] for row in rows]
 
     def _search_fts(
         self, table: str, query: str, namespaces: list[str], limit: int

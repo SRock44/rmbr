@@ -60,6 +60,10 @@ class AnnIndex:
     def __len__(self) -> int:
         return len(self._index)
 
+    def ids(self) -> list[int]:
+        """Every id currently in the index - for `integrity_check()`."""
+        return [int(key) for key in self._index.keys]
+
     def add(self, ids: list[int], vectors: list[np.ndarray]) -> None:
         """Add new vectors. Ids must not already be present — see `replace`."""
         if not ids:

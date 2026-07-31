@@ -83,8 +83,10 @@ def build_mcp_server(
     if not read_only:
 
         @server.tool()
-        def remember(text: str) -> int:
-            """Save a note to this agent's memory. Returns the new memory's id."""
-            return mem.remember(text)
+        def remember(text: str, pinned: bool = False) -> int:
+            """Save a note to this agent's memory. Returns the new memory's id.
+            Set pinned=true for a fact that should never be automatically
+            evicted for being old."""
+            return mem.remember(text, pinned=pinned)
 
     return server

@@ -16,6 +16,15 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 
+class ToolCallError(TypeError):
+    """Raised by `ToolSpec.call()` when the given arguments don't match the
+    tool's schema - typically because the calling model hallucinated an
+    argument. A `TypeError` subclass so existing `except TypeError` handlers
+    still catch it, but with a message aimed at being fed straight back to
+    the model as a tool-result error rather than a Python traceback.
+    """
+
+
 @dataclass
 class ToolSpec:
     """One callable tool: enough to both advertise it to a model and run it."""
@@ -26,27 +35,63 @@ class ToolSpec:
     handler: Callable[..., Any]
 
     def call(self, **kwargs: Any) -> Any:
-        """Invoke the underlying rmbr call directly, e.g. with a tool-use block's parsed arguments."""
+        """Invoke the underlying rmbr call directly, e.g. with a tool-use block's parsed arguments.
+
+        Validates `kwargs` against `self.parameters` first - a model can
+        hallucinate an argument that isn't in the schema (or omit a
+        required one), and without this check that surfaces as a bare
+        Python `TypeError` from argument binding deep inside the handler,
+        indistinguishable from a real bug. Here it's a `ToolCallError`
+        with a message that names the actual problem, safe to return as a
+        tool-result error and let the model retry with corrected input.
+        """
+        properties = self.parameters.get("properties", {})
+        if not self.parameters.get("additionalProperties", False):
+            unexpected = sorted(set(kwargs) - set(properties))
+            if unexpected:
+                valid = ", ".join(sorted(properties)) or "(none)"
+                raise ToolCallError(
+                    f"{self.name}: unexpected argument(s) {unexpected} - valid arguments are: {valid}"
+                )
+        missing = [r for r in self.parameters.get("required", []) if r not in kwargs]
+        if missing:
+            raise ToolCallError(f"{self.name}: missing required argument(s) {missing}")
         return self.handler(**kwargs)
 
-    def to_openai(self) -> dict[str, Any]:
-        """OpenAI (Chat Completions and Responses API-compatible) function-calling tool definition."""
-        return {
-            "type": "function",
-            "function": {
-                "name": self.name,
-                "description": self.description,
-                "parameters": self.parameters,
-            },
-        }
+    def to_openai(self, *, strict: bool = False) -> dict[str, Any]:
+        """OpenAI (Chat Completions and Responses API-compatible) function-calling tool definition.
 
-    def to_anthropic(self) -> dict[str, Any]:
-        """Anthropic Messages API tool-use definition."""
-        return {
+        `strict=True` adds OpenAI's `strict` field, asking the provider to
+        reject a malformed call before it ever reaches you - a complement
+        to, not a replacement for, the validation `call()` already does
+        (not every OpenAI-compatible provider enforces `strict` as tightly
+        as OpenAI itself; `call()` catches what slips through either way).
+        """
+        function: dict[str, Any] = {
+            "name": self.name,
+            "description": self.description,
+            "parameters": self.parameters,
+        }
+        if strict:
+            function["strict"] = True
+        return {"type": "function", "function": function}
+
+    def to_anthropic(self, *, strict: bool = False) -> dict[str, Any]:
+        """Anthropic Messages API tool-use definition.
+
+        `strict=True` adds Anthropic's top-level `strict` field, which
+        guarantees `tool_use.input` validates exactly against the schema
+        before you ever see it. Requires `additionalProperties: false` on
+        the schema, which every built-in rmbr tool schema already sets.
+        """
+        tool: dict[str, Any] = {
             "name": self.name,
             "description": self.description,
             "input_schema": self.parameters,
         }
+        if strict:
+            tool["strict"] = True
+        return tool
 
 
 def hit_to_dict(hit: Any) -> dict[str, Any]:
@@ -95,12 +140,25 @@ _SEARCH_PARAMETERS = {
         },
     },
     "required": ["query"],
+    "additionalProperties": False,
 }
 
 _REMEMBER_PARAMETERS = {
     "type": "object",
-    "properties": {"text": {"type": "string", "description": "The note to remember"}},
+    "properties": {
+        "text": {"type": "string", "description": "The note to remember"},
+        "pinned": {
+            "type": "boolean",
+            "description": (
+                "Protect this memory from automatic eviction under max_memories, "
+                "even once it's no longer among the most recent. Use for facts "
+                "that stay important regardless of age. Default: not pinned."
+            ),
+            "default": False,
+        },
+    },
     "required": ["text"],
+    "additionalProperties": False,
 }
 
 
@@ -148,13 +206,16 @@ def memory_tools(memory: Any, *, read_only: bool = False) -> list[ToolSpec]:
     ]
     if not read_only:
 
-        def remember_handler(text: str) -> int:
-            return memory.remember(text)
+        def remember_handler(text: str, pinned: bool = False) -> int:
+            return memory.remember(text, pinned=pinned)
 
         tools.append(
             ToolSpec(
                 name="remember",
-                description="Save a note to memory. Returns the new memory's id.",
+                description=(
+                    "Save a note to memory. Returns the new memory's id. Set pinned=true "
+                    "for a fact that should never be automatically evicted for being old."
+                ),
                 parameters=_REMEMBER_PARAMETERS,
                 handler=remember_handler,
             )

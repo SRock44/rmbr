@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from ._engine import (
+    check_ann_consistency,
     load_ann_index,
     make_embedder,
     resolve_readable_namespaces,
@@ -421,6 +422,27 @@ class Index:
                 self._ann.remove(chunk_ids)
                 save_ann_index(self._store, _COLLECTION, self._ann)
             self._store.clear_query_cache()
+
+    def stats(self, namespaces: str | list[str] | None = None) -> dict[str, dict[str, Any]]:
+        """Document/chunk counts and time range per namespace —
+        `{namespace: {documents, chunks, oldest, newest}}`.
+
+        Same `namespaces=` semantics as `search()` (default: just this
+        handle's own namespace; `"*"` for every namespace the policy lets
+        it read; an explicit name/list is policy-checked).
+        """
+        readable = resolve_readable_namespaces(
+            self.policy, self.namespace, namespaces, self._store.list_chunk_namespaces
+        )
+        return {ns: self._store.chunk_stats(ns) for ns in readable}
+
+    def integrity_check(self) -> list[str]:
+        """Verify the vector index and the SQLite table agree on which
+        chunks exist, across every namespace in the file. Returns a list
+        of problems (empty means healthy) — see `_engine.check_ann_consistency`
+        for what a mismatch would actually mean and why it'd be surprising.
+        """
+        return check_ann_consistency(self._ann, self._store.all_chunk_ids())
 
     def close(self) -> None:
         self._store.close()
