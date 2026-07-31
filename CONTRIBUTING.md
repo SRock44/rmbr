@@ -26,9 +26,20 @@ semantic behavior, prefer constructing vectors by hand (see
 `tests/test_query_cache.py`'s `MappedEmbedder` for an example) over
 pulling in the real ONNX model — it keeps CI fast and CI-runner-agnostic.
 
+`tests_integration/` is the deliberate exception — real subprocess/socket
+end-to-end tests (a real `python -m rmbr` MCP subprocess, a real uvicorn
+socket) that need network or real wall-clock startup time, kept out of
+the fast `tests/` sweep on purpose. Not run by plain `pytest tests/`; run
+them explicitly with `pytest tests_integration/ -v` if you're touching
+`mcp_server.py`, `server.py`, or `__main__.py`.
+
 ## Before opening a PR
 
 - `pytest tests/` passes locally.
+- `pip install -e ".[dev]" && ruff check src/ tests/ bench/` passes — CI
+  enforces the same command. It's a narrow rule set (see
+  `pyproject.toml`'s `[tool.ruff.lint]` comment for why line-length isn't
+  one of them) aimed at real bugs, not house style.
 - New behavior has a test. A bug fix should include a test that fails
   without the fix.
 - Docstrings on anything public explain what a *caller* needs to know
