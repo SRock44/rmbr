@@ -18,8 +18,9 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any
 
 from ._engine import (
     check_ann_consistency,
@@ -70,7 +71,7 @@ _EXTENSION_SPLITTERS: dict[str, str] = {
 }
 
 
-def _resolve_splitter(splitter: "str | Splitter") -> Splitter:
+def _resolve_splitter(splitter: str | Splitter) -> Splitter:
     if callable(splitter):
         return splitter
     try:
@@ -122,7 +123,7 @@ class Index:
         metadata: dict[str, Any] | None = None,
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
-        splitter: "str | Splitter" = "text",
+        splitter: str | Splitter = "text",
     ) -> int:
         """Index a single piece of text as one document. Returns the document id.
 
@@ -151,7 +152,7 @@ class Index:
         metadata: dict[str, Any] | None = None,
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
-        splitter: "str | Splitter" = "text",
+        splitter: str | Splitter = "text",
     ) -> IngestResult:
         """Index multiple standalone texts in one call. Returns document ids
         (an `IngestResult` — a list with a `.timings` breakdown attached).
@@ -232,7 +233,7 @@ class Index:
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
         encoding: str = "utf-8",
-        splitter: "str | Splitter" = "auto",
+        splitter: str | Splitter = "auto",
     ) -> IngestResult:
         """Index every readable text file under `path` (or a single file).
         Returns document ids (an `IngestResult` — a list with a `.timings`
@@ -447,7 +448,7 @@ class Index:
     def close(self) -> None:
         self._store.close()
 
-    def __enter__(self) -> "Index":
+    def __enter__(self) -> Index:
         return self
 
     def __exit__(self, *exc_info: object) -> None:

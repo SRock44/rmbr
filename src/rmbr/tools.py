@@ -12,8 +12,9 @@ describes rmbr's own capabilities in a shape a model can be told about.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 
 class ToolCallError(TypeError):

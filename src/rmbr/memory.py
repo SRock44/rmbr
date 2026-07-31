@@ -33,7 +33,12 @@ from .ann import AnnIndex
 from .embed import Embedder
 from .policy import Policy
 from .rerank import CrossEncoderReranker
-from .search import DEFAULT_RECENCY_HALF_LIFE_SECONDS, Hits, hybrid_search, matches_where
+from .search import (
+    DEFAULT_RECENCY_HALF_LIFE_SECONDS,
+    Hits,
+    hybrid_search,
+    matches_where,
+)
 from .store import MemoryRecord, Store
 from .tools import ToolSpec, memory_tools
 
@@ -401,7 +406,7 @@ class Memory:
     def close(self) -> None:
         self._store.close()
 
-    def __enter__(self) -> "Memory":
+    def __enter__(self) -> Memory:
         return self
 
     def __exit__(self, *exc_info: object) -> None:

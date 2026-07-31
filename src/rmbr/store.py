@@ -24,7 +24,7 @@ from typing import Any
 
 SCHEMA_VERSION = 1
 
-_SCHEMA = f"""
+_SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT
@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS documents (
     id INTEGER PRIMARY KEY,
     namespace TEXT NOT NULL,
     source TEXT,
-    metadata TEXT NOT NULL DEFAULT '{{}}',
+    metadata TEXT NOT NULL DEFAULT '{}',
     added_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_documents_namespace ON documents(namespace);
@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS chunks (
     document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
     namespace TEXT NOT NULL,
     text TEXT NOT NULL,
-    metadata TEXT NOT NULL DEFAULT '{{}}',
+    metadata TEXT NOT NULL DEFAULT '{}',
     chunk_index INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_chunks_document ON chunks(document_id);
@@ -68,7 +68,7 @@ CREATE TABLE IF NOT EXISTS memories (
     id INTEGER PRIMARY KEY,
     namespace TEXT NOT NULL,
     text TEXT NOT NULL,
-    metadata TEXT NOT NULL DEFAULT '{{}}',
+    metadata TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_memories_namespace ON memories(namespace);
@@ -236,7 +236,7 @@ class Store:
     def close(self) -> None:
         self.conn.close()
 
-    def __enter__(self) -> "Store":
+    def __enter__(self) -> Store:
         return self
 
     def __exit__(self, *exc_info: object) -> None:
