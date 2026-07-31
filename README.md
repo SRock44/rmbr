@@ -3,7 +3,6 @@
 <!-- mcp-name: io.github.SRock44/rmbr -->
 
 [![PyPI](https://img.shields.io/pypi/v/rmbr.svg?style=flat-square)](https://pypi.org/project/rmbr/)
-[![PyPI Downloads](https://img.shields.io/pypi/dm/rmbr.svg?style=flat-square)](https://pypi.org/project/rmbr/)
 [![CI](https://github.com/SRock44/rmbr/actions/workflows/ci.yml/badge.svg)](https://github.com/SRock44/rmbr/actions/workflows/ci.yml)
 [![Python versions](https://img.shields.io/pypi/pyversions/rmbr.svg?style=flat-square)](https://pypi.org/project/rmbr/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)](LICENSE)
