@@ -41,6 +41,16 @@ def test_no_tool_exposes_a_namespace_parameter(tmp_path):
         assert "namespace" not in properties, f"{tool.name} exposes a namespace parameter"
 
 
+def test_every_tool_parameter_has_a_schema_description(tmp_path):
+    """A tool-calling model sees the JSON schema, not the docstring - every
+    parameter needs its own `description`, not just the tool as a whole."""
+    server = build(tmp_path / "agents.db", namespace="coder")
+    for tool in server._tool_manager.list_tools():
+        properties = tool.parameters.get("properties", {})
+        for param_name, schema in properties.items():
+            assert schema.get("description"), f"{tool.name}.{param_name} has no schema description"
+
+
 @pytest.mark.anyio
 async def test_remember_then_recall_through_the_tool_interface(tmp_path):
     server = build(tmp_path / "agents.db", namespace="coder")
