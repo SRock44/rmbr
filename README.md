@@ -15,7 +15,18 @@
 
 > **v0.2.2.** `pip install rmbr` gets you a working library: `Memory`, `Index`, `Policy`, and MCP support (below), all implemented and tested — see [docs/PLAN.md](docs/PLAN.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design.
 
-**Contents:** [Why](#why) · [Quickstart](#quickstart) · [Multi-agent isolation](#multi-agent-isolation-honestly-stated) · [MCP support](#mcp-support) · [Alternatives](#alternatives) · [Performance](#performance) · [Roadmap](#roadmap)
+Start with three lines, then reach for exactly as much more as you need — nothing below is required to use the part above it:
+
+- **`Memory`** — durable, searchable notes your agent chooses to keep, namespaced per agent
+- **`Index`** — hybrid (keyword + semantic) search over your own docs, for RAG
+- **`Policy`** — deny-by-default access control, so one agent can't read another's memory unless you explicitly allow it
+- **Framework adapters** — LangChain and LlamaIndex retrievers, a real LangGraph `BaseStore`, a mem0-API-compatible drop-in, raw OpenAI/Anthropic tool-calling export
+- **An MCP server**, for any MCP client (Claude Desktop, Claude Code, Cursor, ...) — *optional*
+- **An HTTP server**, for serverless functions or anything that'd rather `curl` it than hold a connection open — *also optional*
+
+If you only ever use the first three, that's not a "basic" use of rmbr — that *is* rmbr for most people. The server modes exist for the specific cases they solve, not because you're expected to grow into them.
+
+**Contents:** [Why](#why) · [Quickstart](#quickstart) · [Multi-agent isolation](#multi-agent-isolation-honestly-stated) · [MCP support](#mcp-support) · [HTTP support](#http-support) · [Alternatives](#alternatives) · [Performance](#performance) · [Roadmap](#roadmap)
 
 ## Why
 
@@ -183,9 +194,32 @@ retriever.invoke("how do I deploy?")                 # -> list[Document]
 # LlamaIndex — same idea (pip install llama-index-core):
 retriever = idx.as_llamaindex_retriever(k=5)
 retriever.retrieve("how do I deploy?")                # -> list[NodeWithScore]
+
+# LangGraph — a real BaseStore, drops into StateGraph(...).compile(store=...)
+# (pip install langgraph-checkpoint):
+from rmbr.integrations.langgraph import as_store
+store = as_store("agents.db")
+store.put(("memories", "user-42"), "pref-1", {"text": "user prefers dark mode"})
+store.search(("memories", "user-42"), query="dark mode")   # -> list[SearchItem]
 ```
 
 Both retriever adapters accept the same `search()` keyword arguments (`where=`, `min_similarity=`, `rerank=`, ...) and have async equivalents (`retriever.ainvoke(...)` / `retriever.aretrieve(...)`, backed by `Index.asearch()`). Neither `langchain-core` nor `llama-index-core` is a required rmbr dependency — each adapter imports its target framework lazily, only when you actually call `as_langchain_retriever()`/`as_llamaindex_retriever()`.
+
+`as_store()` maps a LangGraph namespace tuple to one rmbr namespace (joined by `.`), and a LangGraph key to `metadata["_lg_key"]` — see `rmbr/integrations/langgraph.py`'s module docstring for the exact mapping and what's deliberately not supported (per-item TTL, field-path-selective indexing). `langgraph-checkpoint` isn't a required rmbr dependency either.
+
+### Coming from mem0
+
+`rmbr.integrations.mem0_compat.Memory` matches mem0 OSS's local `Memory` class call-for-call (`add()`/`search()`/`get_all()`/`get()`/`update()`/`delete()`/`delete_all()`, same argument names, same `{"results": [...]}` / `{"message": "..."}` return shapes) so most of an existing mem0 integration ports by changing the import and the constructor call:
+
+```python
+from rmbr.integrations.mem0_compat import Memory   # was: from mem0 import Memory
+
+m = Memory("agents.db")                              # was: Memory()  (rmbr writes to a file you name)
+m.add("user prefers dark mode", user_id="alex", infer=False)
+m.search("dark mode", filters={"user_id": "alex"})
+```
+
+This isn't a wrapper around `mem0` — no `mem0ai` dependency, not even optional. One behavior is a deliberate hard no rather than a silent difference: mem0's real default `infer=True` has an LLM read your messages and decide what to keep; rmbr never calls an LLM, so `add(..., infer=True)` (or leaving `infer` unset — mem0's own default) raises `NotImplementedError` naming exactly what's not happening, rather than quietly storing raw text under an argument that claimed something smarter was going on. Pass `infer=False` to store messages as-is. See the module docstring for the full list of what's matched, what's translated (`filters={"key": {"gt": 10}}` -> rmbr's `where=`), and what's unsupported (mem0's `AND`/`OR`/`NOT` filter combinators, `history()`, vision messages).
 
 `as_tool()`/`as_tools()`'s exported schema isn't limited to `query`/`k` — a calling model can also pass `where`/`min_similarity`/`rerank` on any given call (all optional, so a model that doesn't know about them behaves exactly as before):
 
@@ -249,6 +283,16 @@ serve_mcp("agents.db", namespace="coder", read_only=True)
 
 See [MCP support](#mcp-support) below for what this exposes and how to actually connect a client to it.
 
+### Serving memory over HTTP (optional)
+
+```python
+from rmbr import serve_http
+
+serve_http("agents.db", namespace="coder", read_only=True, token="a-shared-secret")
+```
+
+For callers that can't be an MCP client and can't `import rmbr` either — a serverless function, a process on another machine, anything that would rather `curl` a URL than hold a connection open. **You don't need this to use rmbr** — it's an alternative front door onto the same `Memory`/`Index`, not a requirement layered on top of them. See [HTTP support](#http-support) below for the full endpoint list, the auth story, and why it costs zero new dependencies.
+
 ### Contributing / running from source
 
 ```bash
@@ -256,7 +300,7 @@ git clone https://github.com/SRock44/rmbr.git
 cd rmbr
 python -m venv .venv && source .venv/bin/activate   # .venv\Scripts\activate on Windows
 pip install --only-binary :all: -e .
-pytest tests/    # 214 tests, no network or API key required
+pytest tests/    # 267 tests, no network or API key required
 ```
 
 The default embedder (`fastembed`, a local ONNX model) downloads its model weights on first use. Every test in `tests/` instead uses `rmbr.embed.FakeEmbedder` — a deterministic, dependency-free embedder — so the suite runs fully offline; you can inject the same `FakeEmbedder` into your own tests via `Memory(..., embedder=FakeEmbedder())` / `Index(..., embedder=FakeEmbedder())`.
@@ -340,6 +384,83 @@ For Claude Desktop or Claude Code, add it to your MCP config (Claude Desktop's `
 
 Restart the client and its tool list picks up `search`/`recall` (and `remember`, unless read-only) scoped to that one namespace. The rest of the file — every other agent's memory — isn't reachable through this connection; there's no parameter that would let it be.
 
+## HTTP support
+
+**This entire section is optional.** Everything above it — `Memory`, `Index`, `Policy`, MCP — works with no HTTP server anywhere in the picture, and that's how most rmbr users actually run it: import the library, call a few methods, done. Nothing about `serve_http()` existing changes that; it's not a more "grown-up" way to use rmbr, it's a different front door for a specific situation the ones above don't cover.
+
+That situation: **a caller that's in a different process, on a different machine, or can't hold a connection open the way an MCP client does.** MCP expects a client to launch `serve_mcp()` as a subprocess it owns via stdio — a serverless function that spins up per-request can't do that. And if rmbr's `.db` file lives somewhere your caller's process doesn't (a different container, a different machine entirely), `import rmbr` isn't an option either. What *is* always an option: an HTTP request. That's the entire reason `serve_http()` exists — nothing more.
+
+If neither of those describes what you're building, you can stop reading here — rmbr isn't nudging you toward running a server.
+
+### Starting it
+
+```python
+from rmbr import serve_http
+
+serve_http("agents.db", namespace="coder", read_only=True, token="a-shared-secret")
+```
+
+Blocks until stopped — same as `serve_mcp()`, this is meant to be your process's entire job, not something called from inside an app that's also doing other work. Binds to `127.0.0.1` by default; pass `host="0.0.0.0"` only once you've actually decided this should be reachable from outside this machine.
+
+**Zero new dependencies.** Starlette and uvicorn aren't something rmbr added for this — `mcp` (already a hard rmbr dependency, for its own HTTP transport) pulls both in already. Turning on `serve_http()` doesn't grow your dependency tree by a single package.
+
+### What it exposes
+
+Namespace-pinned, the same principle as `serve_mcp()`: no request body or query string anywhere in this API has a `namespace` field, so a caller structurally cannot reach outside the one namespace this server was started for — see [Multi-agent isolation](#multi-agent-isolation-honestly-stated) above for why that matters more than it might sound like it does.
+
+| Method | Path | Calls |
+|---|---|---|
+| `GET` | `/health` | — status + version; the one route that doesn't require auth |
+| `POST` | `/memories` | `Memory.remember()` |
+| `GET` | `/memories` | `Memory.list()` (`?limit=` and `?where=<json>` supported) |
+| `GET` | `/memories/{id}` | `Memory.get()` — `404` if not found |
+| `PATCH` | `/memories/{id}` | `Memory.update()` |
+| `DELETE` | `/memories/{id}` | `Memory.forget()` |
+| `POST` | `/memories/search` | `Memory.recall()` |
+| `GET` | `/memories/stats` | `Memory.stats()` |
+| `POST` | `/documents` | `Index.add_text()` |
+| `DELETE` | `/documents/{id}` | `Index.delete()` |
+| `GET` | `/documents/stats` | `Index.stats()` |
+| `POST` | `/search` | `Index.search()` |
+
+`add_files()` isn't on this list on purpose — it reads from *this process's* local filesystem, which is meaningless to a caller on the other end of an HTTP request. Send the text itself to `POST /documents` instead. Every write route returns `405` when the server was started with `read_only=True`, same semantics as `serve_mcp()`'s `read_only` hiding the `remember` tool entirely.
+
+Talking to it needs nothing but `curl`:
+
+```bash
+curl -X POST http://127.0.0.1:8000/memories \
+  -H "Authorization: Bearer a-shared-secret" \
+  -H "Content-Type: application/json" \
+  -d '{"text": "user prefers dark mode"}'
+# {"id": 1}
+
+curl -X POST http://127.0.0.1:8000/memories/search \
+  -H "Authorization: Bearer a-shared-secret" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "dark mode"}'
+# {"results": [{"id": 1, "text": "user prefers dark mode", "score": ..., ...}], "timings": {...}}
+```
+
+### Auth is opt-in, not automatic
+
+Pass `token=` (or set the `RMBR_TOKEN` environment variable) and every route except `/health` requires `Authorization: Bearer <token>`; leave both unset and there is no auth at all. That default matches rmbr's posture everywhere else — you own the network boundary, rmbr doesn't assume one for you — but it's worth being deliberate rather than just accepting the default: if you're binding to anything other than `127.0.0.1`, set a token.
+
+### Composing it into something bigger
+
+`serve_http()` is a thin, blocking convenience wrapper around `build_app()`, which hands back a plain `Starlette` application — nothing rmbr-proprietary about it:
+
+```python
+from rmbr.server import build_app
+
+app = build_app("agents.db", namespace="coder")
+# it's just an ASGI app from here: mount it inside a larger Starlette/FastAPI
+# app, wrap it in your own middleware (CORS isn't included - add
+# starlette.middleware.cors.CORSMiddleware yourself if you need it), or hand
+# it to a different ASGI server entirely instead of calling serve_http().
+```
+
+Full design notes (why namespace-pinned, what the auth middleware does, what deliberately isn't supported) live in `rmbr/server.py`'s module docstring.
+
 ## Alternatives
 
 Not "competitors" — genuinely different tools for genuinely different jobs. Here's where each one actually fits, including where rmbr *isn't* the right choice.
@@ -377,7 +498,9 @@ Read that third row carefully: **~85-90% of a plain search call's cost is the em
 
 The last two rows are what v0.2's `rerank=True` and `recency_weight` actually cost on top of a plain search call. `rerank=True` is real, measured cost — a local cross-encoder pass over the candidate pool — because it's doing genuine additional inference, not a free re-sort; its p95/p99 run noticeably higher than its p50 because the reranker model lazy-loads (and, on a cold cache, downloads) on an index's first `rerank=True` call, not at import time — use it when result quality matters more than shaving milliseconds, not on every call by default. `recency_weight` is effectively free (same latency as a plain search, within noise), since it's pure-Python exponential decay math over chunks already fetched, no extra model call. Reproduce: `python bench/latency.py --n-calls 100 --n-queries 100 --corpus-size 500`; raw output for all 3 runs is in [`bench/pinned/`](bench/pinned/).
 
-**Bulk-ingest throughput, for full transparency (not a claim we're leading with):** rmbr batches every write in `add_texts()`/`add_files()` into one SQLite transaction, one embedder call, and one ANN-index insert for the whole batch, rather than once per document — a real, measured improvement from 950 to ~3,000 docs/s on a 5,000-doc synthetic corpus. Note what didn't move much: batching the embed call barely helped *in this specific benchmark*, because it feeds every engine identical precomputed vectors (a near-free dict lookup) specifically to isolate storage/ANN performance — a real embedder (ONNX inference, or an API call) has real fixed per-call overhead that batching actually amortizes, so `bench/latency.py`'s numbers above are the more representative ones for real-world embedding cost. Even after this, rmbr is still slower at pure bulk loading than both purpose-built alternatives: Chroma ingests ~2.6x faster (~7,850 docs/s) and LanceDB ~20-55x faster (~65,000-165,000 docs/s, wide variance across runs), because that's a fundamentally different job (one Arrow batch write, zero per-row relational bookkeeping, in LanceDB's case) than what rmbr is built for. What rmbr does hold its own on: recall@5 (0.95) is competitive with LanceDB's exact search (1.0) and ahead of Chroma's (0.80). Full numbers, all 3 seeds, in [`bench/pinned/`](bench/pinned/) and reproducible via `pip install -e ".[bench]" && python bench/run.py`. We're disclosing this, not hiding it: if bulk document loading at scale is your actual workload, see [Alternatives](#alternatives) above — that's not what rmbr optimizes for.
+**Bulk-ingest throughput, for full transparency (not a claim we're leading with):** rmbr batches every write in `add_texts()`/`add_files()` into one SQLite transaction, one embedder call, and one ANN-index insert for the whole batch, rather than once per document — a real, measured ~2,966 docs/s (hybrid, default; median of 3 seeds) on a 5,000-doc synthetic corpus. Note what didn't move much: batching the embed call barely helped *in this specific benchmark*, because it feeds every engine identical precomputed vectors (a near-free dict lookup) specifically to isolate storage/ANN performance — a real embedder (ONNX inference, or an API call) has real fixed per-call overhead that batching actually amortizes, so `bench/latency.py`'s numbers above are the more representative ones for real-world embedding cost.
+
+Against the two purpose-built vector databases, rmbr is still slower at pure bulk loading — a fundamentally different job than what rmbr is built for: Chroma ingests ~2.6x faster (~7,775 docs/s median) and LanceDB ~35-80x faster (~104,000-236,000 docs/s, wide variance across runs), because it's one Arrow batch write with zero per-row relational bookkeeping. Against mem0 — the closer peer, since it's an actual memory abstraction, not a raw vector store — the result flips: rmbr ingests **~7.4x faster** (~2,966 vs ~401 docs/s median), reflecting mem0's real per-row cost (a SQLite history/audit-log write plus a BM25 sparse-vector encode alongside the dense one, on every insert, left on for this benchmark since that's mem0's real default — see [Coming from mem0](#coming-from-mem0) above for why rmbr does neither by default). What rmbr does hold its own on across all three: recall@5 (0.949) is close behind mem0's hybrid search (0.998) and LanceDB's exact search (1.000), and clearly ahead of Chroma's vector-only search (0.797). Full numbers, all 3 seeds (now including mem0), in [`bench/pinned/`](bench/pinned/) and reproducible via `pip install -e ".[bench]" && python bench/run.py`. We're disclosing this, not hiding it: if bulk document loading at scale is your actual workload, see [Alternatives](#alternatives) above — that's not what rmbr optimizes for.
 
 ### Why `bge-small-en-v1.5` is still the default
 

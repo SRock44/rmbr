@@ -34,7 +34,7 @@ jobs:
       # doubles as the check that these extras don't secretly require a
       # build toolchain somewhere).
       - name: Install rmbr (wheels only)
-        run: python -m pip install --only-binary ":all:" -e ".[openai,voyage,cohere,langchain,llamaindex]" pytest
+        run: python -m pip install --only-binary ":all:" -e ".[openai,voyage,cohere,langchain,llamaindex,langgraph]" pytest
 
       - name: Run tests
         run: python -m pytest tests/ -v

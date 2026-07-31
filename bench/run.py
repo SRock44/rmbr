@@ -1,5 +1,5 @@
 """rmbr's bench harness: p50/p95 search latency, ingestion throughput, and
-recall@k, measured against chromadb and lancedb on identical vectors.
+recall@k, measured against chromadb, lancedb, and mem0 on identical vectors.
 
     python -m venv .venv && .venv/bin/pip install -e ".[bench]"
     python bench/run.py
@@ -172,9 +172,9 @@ def main() -> None:
 
     if not args.skip_competitors:
         print("Running competitors...")
-        from competitors import run_chromadb, run_lancedb
+        from competitors import run_chromadb, run_lancedb, run_mem0
 
-        for name, fn in [("chromadb", run_chromadb), ("lancedb", run_lancedb)]:
+        for name, fn in [("chromadb", run_chromadb), ("lancedb", run_lancedb), ("mem0", run_mem0)]:
             result = run_competitor(name, fn, corpus, args.k, workdir)
             if result is not None:
                 results.append(result)

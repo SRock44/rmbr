@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rmbr"
-version = "0.2.3"
+version = "0.2.4"
 description = "Give your agent memory and knowledge. One file, three lines, no server, no API key."
 readme = "README.md"
 license = "MIT"
@@ -31,12 +31,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-bench = ["chromadb", "lancedb"]
+bench = ["chromadb", "lancedb", "mem0ai"]
 openai = ["openai>=1.0"]
 voyage = ["voyageai>=0.2"]
 cohere = ["cohere>=5.0"]
 langchain = ["langchain-core>=0.3"]
 llamaindex = ["llama-index-core>=0.11"]
+langgraph = ["langgraph-checkpoint>=2.0"]
 
 [project.scripts]
 rmbr = "rmbr.__main__:main"

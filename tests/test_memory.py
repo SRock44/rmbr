@@ -32,6 +32,84 @@ def test_list_returns_most_recent_first(tmp_path):
     assert [m.text for m in memories] == ["second memory", "first memory"]
 
 
+def test_get_returns_the_matching_record(tmp_path):
+    db = tmp_path / "agents.db"
+    mem = make_memory(db, "coder")
+    memory_id = mem.remember("user prefers dark mode")
+
+    record = mem.get(memory_id)
+    assert record is not None
+    assert record.id == memory_id
+    assert record.text == "user prefers dark mode"
+
+
+def test_get_returns_none_for_missing_id(tmp_path):
+    db = tmp_path / "agents.db"
+    mem = make_memory(db, "coder")
+    assert mem.get(99999) is None
+
+
+def test_get_across_namespace_denied_by_default_returns_none(tmp_path):
+    db = tmp_path / "agents.db"
+    researcher = make_memory(db, "researcher")
+    memory_id = researcher.remember("researcher secret")
+
+    coder = make_memory(db, "coder")
+    assert coder.get(memory_id) is None  # exists, but not visible - not a PermissionError
+
+
+def test_update_changes_text_and_stays_findable_by_new_text(tmp_path):
+    db = tmp_path / "agents.db"
+    mem = make_memory(db, "coder")
+    memory_id = mem.remember("user prefers dark mode")
+
+    mem.update(memory_id, text="user prefers light mode")
+
+    assert mem.list()[0].text == "user prefers light mode"
+    assert mem.list()[0].id == memory_id  # same id, no new row
+    hits = mem.recall("light mode")
+    assert len(hits) == 1 and hits[0].id == memory_id
+    assert len(mem.recall("dark mode", min_similarity=0.9)) == 0  # old vector is gone, not stale
+
+
+def test_update_metadata_only_leaves_text_unchanged(tmp_path):
+    db = tmp_path / "agents.db"
+    mem = make_memory(db, "coder")
+    memory_id = mem.remember("user prefers dark mode", metadata={"tier": "internal"})
+
+    mem.update(memory_id, metadata={"tier": "public"})
+
+    record = mem.list()[0]
+    assert record.text == "user prefers dark mode"
+    assert record.metadata == {"tier": "public"}
+
+
+def test_update_nonexistent_id_is_noop(tmp_path):
+    db = tmp_path / "agents.db"
+    mem = make_memory(db, "coder")
+    mem.update(99999, text="doesn't matter")  # should not raise
+
+
+def test_update_across_namespace_denied_by_default(tmp_path):
+    db = tmp_path / "agents.db"
+    researcher = make_memory(db, "researcher")
+    memory_id = researcher.remember("researcher note")
+
+    coder = make_memory(db, "coder")
+    with pytest.raises(PermissionError):
+        coder.update(memory_id, text="tampered")
+
+
+def test_aupdate_matches_sync_update(tmp_path):
+    db = tmp_path / "agents.db"
+    mem = make_memory(db, "coder")
+    memory_id = mem.remember("user prefers dark mode")
+
+    asyncio.run(mem.aupdate(memory_id, text="user prefers light mode"))
+
+    assert mem.list()[0].text == "user prefers light mode"
+
+
 def test_forget_removes_memory(tmp_path):
     db = tmp_path / "agents.db"
     mem = make_memory(db, "coder")

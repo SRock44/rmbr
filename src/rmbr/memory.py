@@ -265,6 +265,53 @@ class Memory:
             content, metadata=turn_metadata, namespace=namespace, dedupe_threshold=dedupe_threshold
         )
 
+    def get(self, memory_id: int) -> MemoryRecord | None:
+        """Fetch one memory by id, or `None` if it doesn't exist.
+
+        If it exists but belongs to a namespace this handle can't read,
+        also returns `None` rather than raising — unlike `forget()`/
+        `update()` (explicit actions the caller directed at a specific
+        id), a plain lookup shouldn't confirm "this id exists, you just
+        can't see it" to a caller who isn't allowed to.
+        """
+        record = self._store.get_memory(memory_id)
+        if record is None:
+            return None
+        if record.namespace != self.namespace and not self.policy.can_read(self.namespace, record.namespace):
+            return None
+        return record
+
+    def update(self, memory_id: int, *, text: str | None = None, metadata: dict[str, Any] | None = None) -> None:
+        """Update a memory's text and/or metadata in place — same id, no new row.
+
+        Unlike `remember(..., dedupe_threshold=...)`'s automatic
+        similarity-based update, this updates a specific memory by id on
+        request. Only re-embeds (and touches the vector index) if `text`
+        is given — passing only `metadata` is a pure metadata patch, no
+        re-embedding cost. `metadata=None` leaves existing metadata
+        untouched; pass `{}` explicitly to clear it. No-op if the id
+        doesn't exist. Same cross-namespace write permission check as
+        `forget()`.
+        """
+        record = self._store.get_memory(memory_id)
+        if record is None:
+            return
+        if record.namespace != self.namespace and not self.policy.can_write(
+            self.namespace, record.namespace
+        ):
+            raise PermissionError(
+                f"{self.namespace!r} is not allowed to update memory in namespace {record.namespace!r}"
+            )
+        new_text = text if text is not None else record.text
+        new_metadata = record.metadata if metadata is None else metadata
+        with self._store.transaction():
+            self._store.update_memory(memory_id, new_text, new_metadata)
+            if text is not None and self._ann is not None:
+                vector = self._embedder.embed_one(new_text)
+                self._ann.replace([memory_id], [vector])
+                save_ann_index(self._store, _COLLECTION, self._ann)
+            self._store.clear_query_cache()
+
     def forget(self, memory_id: int) -> None:
         """Delete a memory by id. No-op if it doesn't exist.
 
@@ -380,6 +427,10 @@ class Memory:
     async def arecall(self, query: str, **kwargs: Any) -> Hits:
         async with self._alock:
             return await asyncio.to_thread(self.recall, query, **kwargs)
+
+    async def aupdate(self, memory_id: int, **kwargs: Any) -> None:
+        async with self._alock:
+            return await asyncio.to_thread(self.update, memory_id, **kwargs)
 
     async def aforget(self, memory_id: int) -> None:
         async with self._alock:
