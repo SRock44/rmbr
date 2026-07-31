@@ -2,16 +2,21 @@
 
 <!-- mcp-name: io.github.SRock44/rmbr -->
 
-[![PyPI](https://img.shields.io/pypi/v/rmbr.svg)](https://pypi.org/project/rmbr/)
+[![PyPI](https://img.shields.io/pypi/v/rmbr.svg?style=flat-square)](https://pypi.org/project/rmbr/)
+[![PyPI Downloads](https://img.shields.io/pypi/dm/rmbr.svg?style=flat-square)](https://pypi.org/project/rmbr/)
 [![CI](https://github.com/SRock44/rmbr/actions/workflows/ci.yml/badge.svg)](https://github.com/SRock44/rmbr/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Python versions](https://img.shields.io/pypi/pyversions/rmbr.svg)](https://pypi.org/project/rmbr/)
+[![Python versions](https://img.shields.io/pypi/pyversions/rmbr.svg?style=flat-square)](https://pypi.org/project/rmbr/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)](LICENSE)
+
+[![rmbr MCP server](https://glama.ai/mcp/servers/SRock44/rmbr/badges/card.svg)](https://glama.ai/mcp/servers/SRock44/rmbr)
 
 > **Give your agent memory and knowledge. One file, three lines, no server, no API key.**
 
 `rmbr` ("remember", vowels deleted) is an embedded, local-first **memory + retrieval engine for AI agents and LLM apps** — what SQLite is to Postgres, rmbr aims to be to hosted memory services.
 
 > **v0.2.1.** `pip install rmbr` gets you a working library: `Memory`, `Index`, `Policy`, and MCP support (below), all implemented and tested — see [docs/PLAN.md](docs/PLAN.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design.
+
+**Contents:** [Why](#why) · [Quickstart](#quickstart) · [Multi-agent isolation](#multi-agent-isolation-honestly-stated) · [MCP support](#mcp-support) · [Alternatives](#alternatives) · [Performance](#performance) · [Roadmap](#roadmap)
 
 ## Why
 
