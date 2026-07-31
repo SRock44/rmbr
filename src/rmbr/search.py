@@ -27,9 +27,10 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -94,7 +95,7 @@ def hybrid_search(
     budget_ms: float | None = None,
     oversample: int = DEFAULT_OVERSAMPLE,
     where: dict[str, Any] | None = None,
-    query_cache: "Store | None" = None,
+    query_cache: Store | None = None,
     cache_ttl_seconds: float = DEFAULT_CACHE_TTL_SECONDS,
     cache_threshold: float = DEFAULT_CACHE_THRESHOLD,
     min_similarity: float | None = None,
@@ -330,7 +331,7 @@ def _reciprocal_rank_fusion(
 
 
 def _check_query_cache(
-    store: "Store",
+    store: Store,
     cache_scope: str,
     query_vector: np.ndarray,
     k: int,
@@ -356,9 +357,9 @@ def _check_query_cache(
 
 
 def _write_query_cache(
-    store: "Store", cache_scope: str, query: str, query_vector: np.ndarray, k: int, hits: Hits
+    store: Store, cache_scope: str, query: str, query_vector: np.ndarray, k: int, hits: Hits
 ) -> None:
-    cache_key = hashlib.sha256(f"{cache_scope}:{query}".encode("utf-8")).hexdigest()
+    cache_key = hashlib.sha256(f"{cache_scope}:{query}".encode()).hexdigest()
     payload = json.dumps(
         {
             "k": k,

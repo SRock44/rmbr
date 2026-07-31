@@ -9,7 +9,7 @@ instead of duplicating it. Nothing here is part of rmbr's public surface.
 
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 from .ann import AnnIndex
 from .embed import CachingEmbedder, Embedder, FastEmbedEmbedder

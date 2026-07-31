@@ -32,8 +32,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import numpy as np  # noqa: E402
-
 from quality_data import EXAMPLES  # noqa: E402
+
 from rmbr.embed import Embedder, FastEmbedEmbedder  # noqa: E402
 
 

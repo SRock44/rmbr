@@ -39,17 +39,54 @@ jobs:
       - name: Run tests
         run: python -m pytest tests/ -v
 
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install ruff
+        run: python -m pip install -e ".[dev]"
+      # Lint only, not format - ruff's line-length/wrapping opinions would
+      # rewrite most of this codebase's deliberately prose-heavy docstrings
+      # (see pyproject.toml's [tool.ruff.lint] comment). This catches real
+      # bugs (unused imports/names, undefined references) and import
+      # sorting, not house style.
+      - name: ruff check
+        run: python -m ruff check src/ tests/ bench/
+
+  # tests/ is fast and fully offline by design (see test_mcp.py's own
+  # docstring) - these are the two gaps that leaves: a real `python -m
+  # rmbr` subprocess spoken to by the real MCP client SDK (needs the real
+  # embedder, so needs network on a cold cache), and a real uvicorn socket
+  # hit with a real httpx client instead of Starlette's in-process
+  # TestClient. Single OS (not the full matrix) - this is about exercising
+  # the real subprocess/socket path at all, not cross-platform coverage,
+  # which the `test` job's matrix already covers for the code underneath.
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install rmbr (wheels only)
+        run: python -m pip install --only-binary ":all:" -e "." pytest
+      - name: Run integration tests
+        run: python -m pytest tests_integration/ -v
+
   # A single stable check name for branch protection to require, so it
   # doesn't need updating every time the os/python-version matrix above
   # changes shape.
   ci-success:
-    needs: test
+    needs: [test, lint, integration]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Check matrix result
         run: |
-          if [ "${{ needs.test.result }}" != "success" ]; then
-            echo "One or more matrix jobs failed."
+          if [ "${{ needs.test.result }}" != "success" ] || [ "${{ needs.lint.result }}" != "success" ] || [ "${{ needs.integration.result }}" != "success" ]; then
+            echo "One or more required jobs failed."
             exit 1
           fi

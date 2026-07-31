@@ -24,7 +24,7 @@ security against an adversarial one.
 
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 ALL_NAMESPACES = "*"
 
@@ -41,12 +41,12 @@ class Policy:
         self._on_access: OnAccessCallback | None = None
 
     @classmethod
-    def strict(cls) -> "Policy":
+    def strict(cls) -> Policy:
         """Deny-by-default: a namespace can only read/write itself. This is also the default."""
         return cls()
 
     @classmethod
-    def open(cls) -> "Policy":
+    def open(cls) -> Policy:
         """Allow every namespace to read/write every other namespace. Useful for single-agent setups."""
         policy = cls()
         policy._allow_all = True
@@ -58,7 +58,7 @@ class Policy:
         *,
         read: str | list[str] | None = None,
         write: str | list[str] | None = None,
-    ) -> "Policy":
+    ) -> Policy:
         """Grant ``namespace`` read and/or write access to other namespace(s).
 
         Pass ``"*"`` (or include it in a list) to grant access to every
@@ -70,7 +70,7 @@ class Policy:
             self._writes.setdefault(namespace, set()).update(_as_set(write))
         return self
 
-    def on_access(self, callback: OnAccessCallback) -> "Policy":
+    def on_access(self, callback: OnAccessCallback) -> Policy:
         """Install a custom override: ``callback(who, verb, namespace, default) -> bool``.
 
         ``default`` is what the grant table would have decided on its

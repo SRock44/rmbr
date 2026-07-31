@@ -38,6 +38,7 @@ cohere = ["cohere>=5.0"]
 langchain = ["langchain-core>=0.3"]
 llamaindex = ["llama-index-core>=0.11"]
 langgraph = ["langgraph-checkpoint>=2.0"]
+dev = ["ruff==0.16.1"]
 
 [project.scripts]
 rmbr = "rmbr.__main__:main"
@@ -51,3 +52,16 @@ packages = ["src/rmbr"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+# E501 (line-too-long) is deliberately not selected: rmbr's docstrings are
+# long-form prose by design (see CONTRIBUTING.md / the codebase's own
+# voice) - a hard column limit would fight that rather than catch bugs.
+# This selection is pyflakes (real bugs: unused imports/names, undefined
+# references) + import sorting + pyupgrade (safe modernization), all of
+# which the codebase already passes cleanly.
+select = ["E4", "E7", "E9", "F", "I", "UP"]

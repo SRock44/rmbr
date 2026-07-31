@@ -105,7 +105,7 @@ class AnnIndex:
         return bytes(self._index.save())
 
     @classmethod
-    def from_bytes(cls, blob: bytes, dim: int, metric: str = DEFAULT_METRIC) -> "AnnIndex":
+    def from_bytes(cls, blob: bytes, dim: int, metric: str = DEFAULT_METRIC) -> AnnIndex:
         instance = cls(dim=dim, metric=metric)
         instance._index.load(blob)
         return instance

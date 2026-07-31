@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from ..index import Index
 
 
-def as_retriever(index: "Index", *, k: int = 5, **search_kwargs: Any) -> Any:
+def as_retriever(index: Index, *, k: int = 5, **search_kwargs: Any) -> Any:
     """Wrap `index` as a LangChain `BaseRetriever`.
 
         from rmbr.integrations.langchain import as_retriever

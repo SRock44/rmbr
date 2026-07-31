@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from ..index import Index
 
 
-def as_retriever(index: "Index", *, k: int = 5, **search_kwargs: Any) -> Any:
+def as_retriever(index: Index, *, k: int = 5, **search_kwargs: Any) -> Any:
     """Wrap `index` as a LlamaIndex `BaseRetriever`.
 
         from rmbr.integrations.llamaindex import as_retriever
@@ -36,19 +36,19 @@ def as_retriever(index: "Index", *, k: int = 5, **search_kwargs: Any) -> Any:
     from llama_index.core.schema import NodeWithScore, QueryBundle, TextNode
 
     class RmbrRetriever(BaseRetriever):
-        def __init__(self, rmbr_index: "Index", rmbr_k: int, rmbr_search_kwargs: dict[str, Any]):
+        def __init__(self, rmbr_index: Index, rmbr_k: int, rmbr_search_kwargs: dict[str, Any]):
             self._rmbr_index = rmbr_index
             self._rmbr_k = rmbr_k
             self._rmbr_search_kwargs = rmbr_search_kwargs
             super().__init__()
 
-        def _retrieve(self, query_bundle: "QueryBundle") -> list:
+        def _retrieve(self, query_bundle: QueryBundle) -> list:
             hits = self._rmbr_index.search(
                 query_bundle.query_str, k=self._rmbr_k, **self._rmbr_search_kwargs
             )
             return [_hit_to_node_with_score(h, TextNode, NodeWithScore) for h in hits]
 
-        async def _aretrieve(self, query_bundle: "QueryBundle") -> list:
+        async def _aretrieve(self, query_bundle: QueryBundle) -> list:
             hits = await self._rmbr_index.asearch(
                 query_bundle.query_str, k=self._rmbr_k, **self._rmbr_search_kwargs
             )
