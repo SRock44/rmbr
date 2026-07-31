@@ -22,7 +22,9 @@ can browse "how do I do X with rmbr" without leaving the MCP session.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any
+
+from pydantic import Field
 
 from . import __version__
 from .embed import Embedder
@@ -30,6 +32,24 @@ from .index import Index
 from .memory import Memory
 from .policy import Policy
 from .tools import hit_to_dict
+
+# Tool-parameter annotations, factored out to module level (not inline in
+# build_mcp_server()) because `from __future__ import annotations` makes
+# every annotation a string, and the MCP SDK resolves those strings via
+# eval_str=True against the function's *module* globals - a name that's
+# only a local variable inside build_mcp_server() would raise NameError.
+_QueryArg = Annotated[
+    str, Field(description="What to search for - matched by both keyword and semantic meaning.")
+]
+_KArg = Annotated[int, Field(description="Maximum number of results to return, best match first.")]
+_TextArg = Annotated[str, Field(description="The note to remember, in plain text.")]
+_PinnedArg = Annotated[
+    bool,
+    Field(
+        description="If true, exempt this memory from automatic eviction under max_memories, "
+        "even once it's no longer among the most recent."
+    ),
+]
 
 # Short, runnable examples for common rmbr usage patterns, exposed as an MCP
 # resource template (rmbr://examples/{pattern}) so a connected client can
@@ -139,22 +159,20 @@ def build_mcp_server(
     mem = Memory(path, namespace, policy=policy, embedder=embedder)
 
     @server.tool()
-    def search(query: str, k: int = 5) -> list[dict[str, Any]]:
+    def search(query: _QueryArg, k: _KArg = 5) -> list[dict[str, Any]]:
         """Search this agent's indexed documents by keyword and meaning."""
         return [hit_to_dict(h) for h in idx.search(query, k=k)]
 
     @server.tool()
-    def recall(query: str, k: int = 5) -> list[dict[str, Any]]:
+    def recall(query: _QueryArg, k: _KArg = 5) -> list[dict[str, Any]]:
         """Recall this agent's own remembered notes by keyword and meaning."""
         return [hit_to_dict(h) for h in mem.recall(query, k=k)]
 
     if not read_only:
 
         @server.tool()
-        def remember(text: str, pinned: bool = False) -> int:
-            """Save a note to this agent's memory. Returns the new memory's id.
-            Set pinned=true for a fact that should never be automatically
-            evicted for being old."""
+        def remember(text: _TextArg, pinned: _PinnedArg = False) -> int:
+            """Save a note to this agent's memory. Returns the new memory's id."""
             return mem.remember(text, pinned=pinned)
 
     @server.resource("rmbr://examples")
