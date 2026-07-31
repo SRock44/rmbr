@@ -18,6 +18,6 @@ from .mcp_server import serve_mcp
 from .memory import Memory
 from .policy import Policy
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 __all__ = ["Memory", "Index", "Policy", "serve_mcp"]
