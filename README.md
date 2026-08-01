@@ -58,6 +58,8 @@ mem.recall("user preferences")
 
 Three lines — that's the whole API for the common case. Everything below is opt-in and lives in its own section, so you only read what you actually need. Library-only by design — no CLI to learn. (`python -m rmbr` exists solely so MCP clients can launch the server; see [MCP support](#mcp-support) below.)
 
+**`agents.db` doesn't need to exist first.** There's no `rmbr init`, no template to download, nothing to provision — `Memory(path, ...)` (and `Index(path)`) create the file the moment you call them on a path that doesn't exist yet, with the right schema already in place. The one thing that does need to exist is the *directory* the path lives in (same as opening any file for writing) — `Memory("agents.db", ...)` works from wherever you run it; `Memory("some/deep/agents.db", ...)` needs `some/` to already be there.
+
 ### Indexing documents (RAG)
 
 ```python
