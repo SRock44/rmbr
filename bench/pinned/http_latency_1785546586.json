@@ -1,0 +1,33 @@
+{
+  "config": {
+    "corpus_size": 500,
+    "n_calls": 50
+  },
+  "result": {
+    "corpus_size": 500,
+    "post_memories": {
+      "label": "POST /memories",
+      "n": 50,
+      "mean_ms": 4.28548532538116,
+      "p50_ms": 3.9058029651641846,
+      "p95_ms": 5.419974215328693,
+      "p99_ms": 5.762894172221422
+    },
+    "post_memories_search": {
+      "label": "POST /memories/search",
+      "n": 50,
+      "mean_ms": 3.021019082516432,
+      "p50_ms": 2.9906751587986946,
+      "p95_ms": 3.2904036343097687,
+      "p99_ms": 3.5311421379446983
+    },
+    "get_memories_id": {
+      "label": "GET /memories/{id}",
+      "n": 50,
+      "mean_ms": 0.266249580308795,
+      "p50_ms": 0.2561919391155243,
+      "p95_ms": 0.29548490419983864,
+      "p99_ms": 0.35820435732603073
+    }
+  }
+}

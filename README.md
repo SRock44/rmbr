@@ -13,7 +13,7 @@
 
 `rmbr` ("remember", vowels deleted) is an embedded, local-first **memory + retrieval engine for AI agents and LLM apps** — what SQLite is to Postgres, rmbr aims to be to hosted memory services.
 
-> **v0.2.2.** `pip install rmbr` gets you a working library: `Memory`, `Index`, `Policy`, and MCP support (below), all implemented and tested — see [docs/PLAN.md](docs/PLAN.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design.
+> **v0.2.4.** `pip install rmbr` gets you a working library: `Memory`, `Index`, `Policy`, MCP support, an optional HTTP server, and framework adapters for LangChain/LlamaIndex/LangGraph/mem0 (all below), all implemented and tested — see [docs/PLAN.md](docs/PLAN.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design.
 
 Start with three lines, then reach for exactly as much more as you need — nothing below is required to use the part above it:
 
@@ -57,6 +57,8 @@ mem.recall("user preferences")
 ```
 
 Three lines — that's the whole API for the common case. Everything below is opt-in and lives in its own section, so you only read what you actually need. Library-only by design — no CLI to learn. (`python -m rmbr` exists solely so MCP clients can launch the server; see [MCP support](#mcp-support) below.)
+
+**`agents.db` doesn't need to exist first.** There's no `rmbr init`, no template to download, nothing to provision — `Memory(path, ...)` (and `Index(path)`) create the file the moment you call them on a path that doesn't exist yet, with the right schema already in place. The one thing that does need to exist is the *directory* the path lives in (same as opening any file for writing) — `Memory("agents.db", ...)` works from wherever you run it; `Memory("some/deep/agents.db", ...)` needs `some/` to already be there.
 
 ### Indexing documents (RAG)
 
@@ -126,6 +128,24 @@ mem.forget_older_than(60 * 60 * 24 * 30)     # delete anything older than 30 day
 # memories from it:
 mem.remember("the customer's account was permanently deactivated", pinned=True)
 ```
+
+Loading many items into an already-large namespace (an org's internal doc set, a backfill of historical memories) is a different situation than a single `remember()` mid-conversation — batch it:
+
+```python
+# Without this, every single remember()/add_text() call re-serializes the
+# *entire* vector index (usearch has no incremental on-disk save) - fine
+# at hundreds-to-low-thousands per namespace, real cost once a namespace
+# has tens of thousands of items and you're adding many more sequentially.
+with mem.bulk():
+    for fact in many_facts:
+        mem.remember(fact)
+# SQL rows are still durable immediately inside the block; only the vector
+# index's persistence is deferred to one write when the block exits - a
+# crash mid-block loses whatever hadn't been flushed yet, a real tradeoff
+# you're opting into, not a silent one. See Performance below for numbers.
+```
+
+`Index` has the same `.bulk()`.
 
 Check on a namespace's memory without hand-writing SQL:
 
@@ -300,7 +320,7 @@ git clone https://github.com/SRock44/rmbr.git
 cd rmbr
 python -m venv .venv && source .venv/bin/activate   # .venv\Scripts\activate on Windows
 pip install --only-binary :all: -e .
-pytest tests/    # 267 tests, no network or API key required
+pytest tests/    # 284 tests, no network or API key required
 ```
 
 The default embedder (`fastembed`, a local ONNX model) downloads its model weights on first use. Every test in `tests/` instead uses `rmbr.embed.FakeEmbedder` — a deterministic, dependency-free embedder — so the suite runs fully offline; you can inject the same `FakeEmbedder` into your own tests via `Memory(..., embedder=FakeEmbedder())` / `Index(..., embedder=FakeEmbedder())`.
@@ -502,6 +522,35 @@ The last two rows are what v0.2's `rerank=True` and `recency_weight` actually co
 
 Against the two purpose-built vector databases, rmbr is still slower at pure bulk loading — a fundamentally different job than what rmbr is built for: Chroma ingests ~2.6x faster (~7,775 docs/s median) and LanceDB ~35-80x faster (~104,000-236,000 docs/s, wide variance across runs), because it's one Arrow batch write with zero per-row relational bookkeeping. Against mem0 — the closer peer, since it's an actual memory abstraction, not a raw vector store — the result flips: rmbr ingests **~7.4x faster** (~2,966 vs ~401 docs/s median), reflecting mem0's real per-row cost (a SQLite history/audit-log write plus a BM25 sparse-vector encode alongside the dense one, on every insert, left on for this benchmark since that's mem0's real default — see [Coming from mem0](#coming-from-mem0) above for why rmbr does neither by default). What rmbr does hold its own on across all three: recall@5 (0.949) is close behind mem0's hybrid search (0.998) and LanceDB's exact search (1.000), and clearly ahead of Chroma's vector-only search (0.797). Full numbers, all 3 seeds (now including mem0), in [`bench/pinned/`](bench/pinned/) and reproducible via `pip install -e ".[bench]" && python bench/run.py`. We're disclosing this, not hiding it: if bulk document loading at scale is your actual workload, see [Alternatives](#alternatives) above — that's not what rmbr optimizes for.
 
+### Scale: what happens once a namespace holds tens of thousands of items
+
+`usearch` (the vector index) has no incremental on-disk save — every `remember()`/`add_text()` call re-serializes and rewrites the *entire* vector index, every time. At rmbr's normal scale (hundreds to low-thousands per namespace) that's negligible. Once a namespace grows into the tens of thousands, many sequential writes each pay to reserialize everything that came before — real, measured, and now fixed with `Memory.bulk()`/`Index.bulk()` (see [Keeping memory accurate over time](#keeping-memory-accurate-over-time) above for usage). Cost of 50 sequential `remember()` calls into an already-populated namespace, with vs. without `.bulk()`:
+
+| namespace size | no `.bulk()` (total / per-write) | with `.bulk()` (total / per-write) | speedup |
+|---:|---:|---:|---:|
+| 1,000 | 196ms / 3.93ms | 40ms / 0.81ms | 4.9x |
+| 5,000 | 1,392ms / 27.83ms | 87ms / 1.74ms | 16.0x |
+| 10,000 | 2,802ms / 56.04ms | 123ms / 2.46ms | 22.8x |
+| 20,000 | 5,555ms / 111.10ms | 195ms / 3.89ms | 28.6x |
+| 40,000 | 12,135ms / 242.70ms | 341ms / 6.82ms | **35.6x** |
+
+Without `.bulk()`, per-write cost climbs linearly with namespace size — the signature of the O(n) reserialize happening on every call. With it, per-write cost barely grows (0.81ms → 6.82ms across a 40x size increase) because the expensive reserialize happens once per batch, not once per write — and the speedup keeps *growing* with scale, not just holding steady. `Index.add_text()` shows the same shape (up to 33.5x at 40,000). `.bulk()` is opt-in and changes nothing by default — every call remains immediately durable unless you explicitly defer. Reproduce: `python bench/scale.py --sizes 1000 5000 10000 20000 40000 --n-writes 50`; raw output in [`bench/pinned/`](bench/pinned/).
+
+### Real protocol round-trip: MCP and HTTP, not just the Python API
+
+The numbers above measure the in-process Python API. What a caller actually experiences going through MCP or HTTP includes real subprocess/socket overhead on top — measured with a real `python -m rmbr` subprocess talked to over real stdio by the real `mcp` client SDK, and a real uvicorn server on a real OS socket hit with a real `httpx` client (not the in-process shortcuts the test suite uses for speed), real default embedder, 500-item corpus, 50 samples per call:
+
+| | mean | p50 | p95 | p99 |
+|---|---:|---:|---:|---:|
+| MCP `remember` tool call | 4.58ms | 4.38ms | 5.72ms | 5.82ms |
+| MCP `recall` tool call | 3.51ms | 3.48ms | 3.69ms | 3.78ms |
+| MCP `search` tool call | 0.52ms | 0.50ms | 0.54ms | 0.61ms |
+| HTTP `POST /memories` | 4.29ms | 3.91ms | 5.42ms | 5.76ms |
+| HTTP `POST /memories/search` | 3.02ms | 2.99ms | 3.29ms | 3.53ms |
+| HTTP `GET /memories/{id}` | 0.27ms | 0.26ms | 0.30ms | 0.36ms |
+
+Protocol overhead on top of the raw Python API numbers above is small — low single-digit milliseconds, not the dominant cost. `session.initialize()` (spawning the MCP subprocess and completing the handshake) is the one genuinely slow one-time cost, at ~741ms — pay it once per session, not per call. Reproduce: `python bench/mcp_latency.py` / `python bench/http_latency.py`; raw output in [`bench/pinned/`](bench/pinned/).
+
 ### Why `bge-small-en-v1.5` is still the default
 
 We tested. `bench/quality.py` measures recall@1 on 150 hand-written (query, correct passage, distractors) examples — 50 each spanning remembered preferences, documentation, and code, the actual shapes of content rmbr indexes — against every same-size-class local embedding model `fastembed` supports, plus `bge-base-en-v1.5` as a "what does 3x the size buy you" reference point:
@@ -528,8 +577,10 @@ Full data and every candidate's per-category breakdown: `python bench/quality.py
 - **v0.2** — similarity-based memory dedupe/update (`dedupe_threshold`), bounded retention (`max_memories`, `forget_older_than`), recency-weighted ranking for both `Memory.recall()` and `Index.search()`, richer `where=` filtering (`$gt`/`$gte`/`$lt`/`$lte`/`$in`/`$nin`/`$ne`, not just equality, now also usable on `Memory.list()`), a real confidence gate on raw cosine similarity (`min_similarity`, plus `hit.bm25_score`/`hit.vector_score` on every result), an optional local cross-encoder reranker (`rerank=True`), a conversation-memory convenience (`remember_turn()`), tool-calling export for hand-rolled agent loops (`as_tool()`/`as_tools()`, OpenAI- and Anthropic-shaped, exposing the full `where`/`min_similarity`/`rerank` knob set — not just `query`/`k`), LangChain/LlamaIndex retriever adapters (`as_langchain_retriever()`/`as_llamaindex_retriever()`, both optional/lazy-imported), two more hosted embedding providers (`VoyageEmbedder`, `CohereEmbedder` — same `Embedder` protocol as `OpenAIEmbedder`), and two more auto-detected chunkers (`split_json`, `split_rst`, both stdlib-only)
 - **v0.2.1** — adoption/DX polish: a `py.typed` marker (mypy/pyright now trust rmbr's type hints), README badges (PyPI/CI/license/Python versions), pinned `rerank=True`/`recency_weight` latency numbers alongside the existing `remember()`/`search()` table, a `bench/latency.py` fix (each scenario now runs in its own subprocess — running them in one process was polluting each other's tail-latency numbers), and a runnable multi-agent support example (`examples/multi_agent_support/`). Hardened against real-world tool-calling failure modes surfaced by stress-testing the example against a small, fast, unreliable model: `ToolSpec.call()` now validates arguments against the tool's own schema and raises a clear `ToolCallError` instead of a bare `TypeError` when a model hallucinates one; every built-in tool schema sets `additionalProperties: false`; `to_anthropic()`/`to_openai()` gained a `strict=True` option; `Memory`/`Index` gained `stats()` and `integrity_check()` for inspecting a `.db` file's health without hand-writing SQL; and `remember(..., pinned=True)` exempts specific memories from `max_memories`' otherwise-pure-recency eviction
 - **v0.2.2** — Glama.ai MCP directory listing (verified live, deployed against a pinned commit), an MCP resource template (`rmbr://examples/{pattern}`, plus `rmbr://examples` as an index) serving short runnable snippets for common usage patterns to any MCP client that can browse resources, and a fix for `serve_mcp()` reporting an empty `version` string in `serverInfo` (caught live while smoke-testing the Glama deploy)
-- **Known gaps** — none carried over from v0.2's list; nothing new opened yet
-- **Next** — a pluggable consolidation hook (`mem.consolidate(extractor)`): rmbr still never calls an LLM itself, but a caller-supplied extractor callable would let rmbr orchestrate mem0-style fact extraction/dedup/update against your own model choice, without rmbr owning an API key. Design in progress, not yet built.
+- **v0.2.3** — per-parameter JSON Schema `description` fields on every MCP tool argument (`search`/`recall`/`remember`'s `query`/`k`/`text`/`pinned`), fixing a real gap Glama.ai's own quality scoring caught: a tool-calling model sees the JSON schema, not the docstring, and none of these parameters had one
+- **v0.2.4** — two new framework adapters (a real LangGraph `BaseStore` via `as_store()`, verified against `langgraph-checkpoint`'s actual op contract; a mem0-API-compatible `Memory` drop-in reimplemented from scratch, no `mem0ai` dependency), an optional HTTP server (`serve_http`/`build_app` — Starlette+uvicorn, zero new dependencies since `mcp` already pulls both in, namespace-pinned like MCP, opt-in auth), `Memory.get()`/`Memory.update()` for direct record access by id, mem0 added to the bench comparison lane with pinned numbers rerun on the project's bench box, and a real CI/CD hardening pass: a ruff lint gate, genuine subprocess/socket integration tests (a real `python -m rmbr` MCP subprocess and a real uvicorn socket, not in-process shortcuts), Dependabot, CodeQL, and a `SECURITY.md`
+- **Known gaps** — none carried over; nothing new opened yet
+- **Next** — a pluggable consolidation hook (`mem.consolidate(extractor)`): rmbr still never calls an LLM itself, but a caller-supplied extractor callable would let rmbr orchestrate mem0-style fact extraction/dedup/update against your own model choice, without rmbr owning an API key. Deliberately not being built yet.
 
 ## License
 

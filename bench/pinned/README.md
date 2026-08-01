@@ -46,3 +46,35 @@ actually gets it by installing it — same reasoning as rmbr's own
 pip install -e ".[bench]"
 python bench/run.py --n-docs 5000 --n-queries 500 --dim 384 --k 5 --seed 0
 ```
+
+## `scale_*.json` — `Memory.bulk()`/`Index.bulk()` impact at growing namespace sizes
+
+Answers a specific question: without `.bulk()`, every write re-serializes
+the *entire* vector index (usearch has no incremental on-disk save), so
+does rmbr actually hold up once a namespace has tens of thousands of
+items in it? Measures the cost of 50 sequential writes with vs. without
+`.bulk()`, at namespace sizes from 1,000 to 40,000. `FakeEmbedder`, same
+reasoning as `bench_*.json` — isolates storage/ANN persistence cost from
+embedding cost. One run (not 3 seeds): this is a deterministic
+measurement of a serialization cost, not something embedding/network
+jitter affects run to run, so repeat runs add little signal here.
+
+```bash
+pip install -e .
+python bench/scale.py --sizes 1000 5000 10000 20000 40000 --n-writes 50
+```
+
+## `mcp_latency_*.json` / `http_latency_*.json` — real protocol round-trip
+
+What a caller actually experiences through MCP or HTTP, not just the
+in-process Python API `latency_*.json` measures: `mcp_latency.py` spawns
+a real `python -m rmbr` subprocess and talks to it over real stdio with
+the real `mcp` client SDK; `http_latency.py` binds a real uvicorn server
+to a real OS socket and hits it with a real `httpx` client. Both use the
+real default embedder, 500-doc/memory corpus, 50 samples per call type.
+
+```bash
+pip install -e .
+python bench/mcp_latency.py --corpus-size 500 --n-calls 50
+python bench/http_latency.py --corpus-size 500 --n-calls 50
+```
