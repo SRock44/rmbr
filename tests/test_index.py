@@ -1,4 +1,6 @@
 import asyncio
+import sys
+from unittest.mock import patch
 
 import pytest
 
@@ -187,6 +189,66 @@ def test_add_files_indexes_directory(tmp_path):
     assert len(document_ids) == 2  # png skipped
     hits = idx.search("install package pip")
     assert len(hits) >= 1
+
+
+def _make_minimal_pdf(text: str) -> bytes:
+    """Hand-rolled, minimal-but-valid single-page PDF - see test_extract.py
+    for the same helper with more explanation."""
+    stream = f"BT /F1 12 Tf 10 100 Td ({text}) Tj ET".encode()
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] "
+        b"/Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+        f"<< /Length {len(stream)} >>\nstream\n".encode() + stream + b"\nendstream",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = [0]
+    for i, body in enumerate(objects, start=1):
+        offsets.append(len(out))
+        out += f"{i} 0 obj\n".encode() + body + b"\nendobj\n"
+    xref_offset = len(out)
+    out += f"xref\n0 {len(objects) + 1}\n".encode()
+    out += b"0000000000 65535 f \n"
+    for offset in offsets[1:]:
+        out += f"{offset:010d} 00000 n \n".encode()
+    out += f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF".encode()
+    return bytes(out)
+
+
+def test_add_files_extracts_pdf_and_docx_alongside_text(tmp_path):
+    docx = pytest.importorskip("docx")
+    pytest.importorskip("pypdf")
+
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "readme.txt").write_text("a plain text file about setup")
+    (docs / "guide.pdf").write_bytes(_make_minimal_pdf("the deployment guide covers docker"))
+
+    document = docx.Document()
+    document.add_paragraph("notes about the release process")
+    document.save(str(docs / "notes.docx"))
+
+    db = tmp_path / "agents.db"
+    idx = make_index(db)
+    document_ids = idx.add_files(str(docs))
+
+    assert len(document_ids) == 3
+    assert idx.search("docker deployment")[0].text == "the deployment guide covers docker"
+    assert idx.search("release process")[0].text == "notes about the release process"
+
+
+def test_add_files_pdf_without_extra_raises_not_silently_skips(tmp_path):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "guide.pdf").write_bytes(_make_minimal_pdf("x"))
+
+    db = tmp_path / "agents.db"
+    idx = make_index(db)
+    with patch.dict(sys.modules, {"pypdf": None}):
+        with pytest.raises(ImportError, match="rmbr\\[pdf\\]"):
+            idx.add_files(str(docs))
 
 
 def test_add_files_single_file(tmp_path):

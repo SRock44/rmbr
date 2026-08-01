@@ -42,6 +42,7 @@ from .chunk import (
     split_text,
 )
 from .embed import Embedder
+from .extract import EXTRACTORS
 from .policy import Policy
 from .rerank import CrossEncoderReranker
 from .search import DEFAULT_RECENCY_HALF_LIFE_SECONDS, Hits, hybrid_search
@@ -276,11 +277,19 @@ class Index:
         Only recognized text extensions are read (see `_TEXT_SUFFIXES`);
         anything else is skipped rather than raising, since walking a real
         docs/ directory usually turns up a few images or lockfiles you
-        didn't mean to index.
+        didn't mean to index. `.pdf`/`.docx` are the one exception: they're
+        recognized but need an optional extra (`pip install rmbr[pdf]` /
+        `rmbr[docx]`) to actually extract — found without it installed,
+        that raises `ImportError` rather than silently skipping, since a
+        PDF sitting right there in the directory you asked to index isn't
+        the "you clearly didn't mean this" case a lockfile is. See
+        `rmbr.extract`'s module docstring for extraction quality caveats
+        (no OCR, uneven results on complex layouts).
         """
         groups: dict[Any, tuple[list[str], list[str]]] = {}
         for file_path in _iter_text_files(Path(path), pattern):
-            text = file_path.read_text(encoding=encoding, errors="ignore")
+            extractor = EXTRACTORS.get(file_path.suffix.lower())
+            text = extractor(file_path) if extractor else file_path.read_text(encoding=encoding, errors="ignore")
             if not text.strip():
                 continue
             resolved = splitter
@@ -510,13 +519,16 @@ class Index:
             return await asyncio.to_thread(self.search, query, **kwargs)
 
 
+_READABLE_SUFFIXES = _TEXT_SUFFIXES | EXTRACTORS.keys()
+
+
 def _iter_text_files(path: Path, pattern: str) -> Iterable[Path]:
     if path.is_file():
-        if path.suffix.lower() in _TEXT_SUFFIXES:
+        if path.suffix.lower() in _READABLE_SUFFIXES:
             yield path
         return
     for candidate in sorted(path.glob(pattern)):
-        if candidate.is_file() and candidate.suffix.lower() in _TEXT_SUFFIXES:
+        if candidate.is_file() and candidate.suffix.lower() in _READABLE_SUFFIXES:
             yield candidate
 
 
