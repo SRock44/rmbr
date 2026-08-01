@@ -95,6 +95,78 @@ def test_add_files_persists_ann_index_once_not_per_file(tmp_path, monkeypatch):
     assert len(save_calls) == 1
 
 
+def _count_ann_saves(idx, monkeypatch):
+    save_calls = []
+    original_set_ann_blob = idx._store.set_ann_blob
+
+    def counting_set_ann_blob(*args, **kwargs):
+        save_calls.append(1)
+        return original_set_ann_blob(*args, **kwargs)
+
+    monkeypatch.setattr(idx._store, "set_ann_blob", counting_set_ann_blob)
+    return save_calls
+
+
+def test_without_bulk_every_add_text_call_persists_separately(tmp_path, monkeypatch):
+    db = tmp_path / "agents.db"
+    idx = make_index(db)
+    save_calls = _count_ann_saves(idx, monkeypatch)
+
+    for i in range(3):
+        idx.add_text(f"document number {i}")
+
+    assert len(save_calls) == 3  # the baseline .bulk() improves on
+
+
+def test_bulk_defers_persistence_to_one_save_on_exit(tmp_path, monkeypatch):
+    db = tmp_path / "agents.db"
+    idx = make_index(db)
+    save_calls = _count_ann_saves(idx, monkeypatch)
+
+    with idx.bulk():
+        for i in range(5):
+            idx.add_text(f"document number {i}")
+        assert len(save_calls) == 0  # nothing persisted yet, still inside the block
+
+    assert len(save_calls) == 1  # exactly one save, on exit
+
+
+def test_bulk_search_sees_writes_made_inside_the_block(tmp_path):
+    db = tmp_path / "agents.db"
+    idx = make_index(db)
+
+    with idx.bulk():
+        idx.add_text("the deployment guide covers docker")
+        hits = idx.search("docker deployment")  # in-memory index already updated
+        assert len(hits) == 1
+
+
+def test_bulk_writes_are_durable_across_reopen(tmp_path):
+    db = tmp_path / "agents.db"
+    idx = make_index(db)
+    with idx.bulk():
+        idx.add_text("the deployment guide covers docker")
+
+    reopened = make_index(db)
+    hits = reopened.search("docker deployment")
+    assert len(hits) == 1
+
+
+def test_bulk_nested_only_saves_once_at_outermost_exit(tmp_path, monkeypatch):
+    db = tmp_path / "agents.db"
+    idx = make_index(db)
+    save_calls = _count_ann_saves(idx, monkeypatch)
+
+    with idx.bulk():
+        idx.add_text("outer document")
+        with idx.bulk():
+            idx.add_text("inner document")
+        assert len(save_calls) == 0  # inner exit must not have flushed yet
+        idx.add_text("outer document again")
+
+    assert len(save_calls) == 1
+
+
 def test_add_texts_empty_list_is_noop(tmp_path):
     db = tmp_path / "agents.db"
     idx = make_index(db)

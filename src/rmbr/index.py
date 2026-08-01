@@ -18,7 +18,8 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -113,6 +114,31 @@ class Index:
         self._ann = load_ann_index(self._store, _COLLECTION)
         self._alock = asyncio.Lock()
         self._reranker: CrossEncoderReranker | None = None
+        self._deferred_save = False
+
+    def _save_ann(self) -> None:
+        if not self._deferred_save and self._ann is not None:
+            save_ann_index(self._store, _COLLECTION, self._ann)
+
+    @contextmanager
+    def bulk(self) -> Iterator[None]:
+        """Defer the vector-index write until this block exits, instead of
+        after every `add_text()`/`add_files()`/`delete()` inside it.
+
+        Same tradeoff and same reasoning as `Memory.bulk()` — see there
+        for the full explanation. In short: SQL rows stay immediately
+        committed; only the vector index's full re-serialize-and-write is
+        deferred to one save at the end, which matters once a namespace's
+        index has grown into the tens of thousands and every write would
+        otherwise pay to reserialize the entire thing.
+        """
+        already_deferred = self._deferred_save
+        self._deferred_save = True
+        try:
+            yield
+        finally:
+            self._deferred_save = already_deferred
+            self._save_ann()
 
     def add_text(
         self,
@@ -211,7 +237,7 @@ class Index:
             if self._ann is None:
                 self._ann = AnnIndex(dim=len(all_vectors[0]))
             self._ann.add(all_chunk_ids, all_vectors)
-            save_ann_index(self._store, _COLLECTION, self._ann)
+            self._save_ann()
             self._store.clear_query_cache()
             timings["ann_ms"] = _ms_since(t0)
 
@@ -421,7 +447,7 @@ class Index:
             self._store.delete_document(document_id)
             if self._ann is not None and chunk_ids:
                 self._ann.remove(chunk_ids)
-                save_ann_index(self._store, _COLLECTION, self._ann)
+                self._save_ann()
             self._store.clear_query_cache()
 
     def stats(self, namespaces: str | list[str] | None = None) -> dict[str, dict[str, Any]]:

@@ -11,6 +11,78 @@ def make_memory(path, namespace, **kwargs):
     return Memory(str(path), namespace, embedder=FakeEmbedder(dimension=16), **kwargs)
 
 
+def _count_ann_saves(mem, monkeypatch):
+    save_calls = []
+    original_set_ann_blob = mem._store.set_ann_blob
+
+    def counting_set_ann_blob(*args, **kwargs):
+        save_calls.append(1)
+        return original_set_ann_blob(*args, **kwargs)
+
+    monkeypatch.setattr(mem._store, "set_ann_blob", counting_set_ann_blob)
+    return save_calls
+
+
+def test_without_bulk_every_remember_call_persists_separately(tmp_path, monkeypatch):
+    db = tmp_path / "agents.db"
+    mem = make_memory(db, "coder")
+    save_calls = _count_ann_saves(mem, monkeypatch)
+
+    for i in range(3):
+        mem.remember(f"memory number {i}")
+
+    assert len(save_calls) == 3  # the baseline .bulk() improves on
+
+
+def test_bulk_defers_persistence_to_one_save_on_exit(tmp_path, monkeypatch):
+    db = tmp_path / "agents.db"
+    mem = make_memory(db, "coder")
+    save_calls = _count_ann_saves(mem, monkeypatch)
+
+    with mem.bulk():
+        for i in range(5):
+            mem.remember(f"memory number {i}")
+        assert len(save_calls) == 0  # nothing persisted yet, still inside the block
+
+    assert len(save_calls) == 1  # exactly one save, on exit
+
+
+def test_bulk_recall_sees_writes_made_inside_the_block(tmp_path):
+    db = tmp_path / "agents.db"
+    mem = make_memory(db, "coder")
+
+    with mem.bulk():
+        mem.remember("user prefers dark mode")
+        hits = mem.recall("dark mode")  # in-memory index already updated
+        assert len(hits) == 1
+
+
+def test_bulk_writes_are_durable_across_reopen(tmp_path):
+    db = tmp_path / "agents.db"
+    mem = make_memory(db, "coder")
+    with mem.bulk():
+        mem.remember("user prefers dark mode")
+
+    reopened = make_memory(db, "coder")
+    hits = reopened.recall("dark mode")
+    assert len(hits) == 1
+
+
+def test_bulk_nested_only_saves_once_at_outermost_exit(tmp_path, monkeypatch):
+    db = tmp_path / "agents.db"
+    mem = make_memory(db, "coder")
+    save_calls = _count_ann_saves(mem, monkeypatch)
+
+    with mem.bulk():
+        mem.remember("outer memory")
+        with mem.bulk():
+            mem.remember("inner memory")
+        assert len(save_calls) == 0  # inner exit must not have flushed yet
+        mem.remember("outer memory again")
+
+    assert len(save_calls) == 1
+
+
 def test_remember_and_recall_roundtrip(tmp_path):
     db = tmp_path / "agents.db"
     mem = make_memory(db, "researcher")

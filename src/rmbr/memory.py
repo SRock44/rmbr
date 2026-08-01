@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any
 
@@ -68,6 +70,43 @@ class Memory:
         self._default_dedupe_threshold = dedupe_threshold
         self._max_memories = max_memories
         self._reranker: CrossEncoderReranker | None = None
+        self._deferred_save = False
+
+    def _save_ann(self) -> None:
+        if not self._deferred_save and self._ann is not None:
+            save_ann_index(self._store, _COLLECTION, self._ann)
+
+    @contextmanager
+    def bulk(self) -> Iterator[None]:
+        """Defer the vector-index write until this block exits, instead of
+        after every `remember()`/`forget()`/`update()` inside it.
+
+        SQL rows are still committed immediately, same durability as
+        always — only the vector index's (expensive at scale) full
+        re-serialize-and-write step is deferred to one save when the
+        block exits, instead of paying that cost on every single call.
+        `recall()` inside the block already sees everything you've added
+        so far (the in-memory index is updated immediately; only its
+        on-disk persistence is deferred).
+
+        Use this for many sequential writes into an existing large
+        namespace — an agent calling `remember()` fact-by-fact into a
+        namespace that already holds tens of thousands of memories pays
+        for reserializing the *entire* index on every single call
+        without this, since the vector index (`usearch`, HNSW-based) has
+        no incremental on-disk save. At rmbr's normal scale (hundreds to
+        low-thousands per namespace) that cost is negligible and this
+        context manager isn't needed. A crash inside the block loses
+        whatever hadn't been flushed yet — a real, opt-in durability
+        tradeoff, not a silent one, which is why this isn't the default.
+        """
+        already_deferred = self._deferred_save
+        self._deferred_save = True
+        try:
+            yield
+        finally:
+            self._deferred_save = already_deferred
+            self._save_ann()
 
     def remember(
         self,
@@ -128,7 +167,7 @@ class Memory:
                 if evicted:
                     self._ann.remove(evicted)
 
-            save_ann_index(self._store, _COLLECTION, self._ann)
+            self._save_ann()
             self._store.clear_query_cache()
 
         return memory_id
@@ -314,7 +353,7 @@ class Memory:
             if text is not None and self._ann is not None:
                 vector = self._embedder.embed_one(new_text)
                 self._ann.replace([memory_id], [vector])
-                save_ann_index(self._store, _COLLECTION, self._ann)
+                self._save_ann()
             self._store.clear_query_cache()
 
     def forget(self, memory_id: int) -> None:
@@ -338,7 +377,7 @@ class Memory:
             self._store.delete_memory(memory_id)
             if self._ann is not None:
                 self._ann.remove([memory_id])
-                save_ann_index(self._store, _COLLECTION, self._ann)
+                self._save_ann()
             self._store.clear_query_cache()
 
     def forget_older_than(self, seconds: float, *, namespace: str | None = None) -> int:
@@ -357,7 +396,7 @@ class Memory:
             deleted_ids = self._store.delete_memories_before(target_namespace, cutoff)
             if deleted_ids and self._ann is not None:
                 self._ann.remove(deleted_ids)
-                save_ann_index(self._store, _COLLECTION, self._ann)
+                self._save_ann()
             self._store.clear_query_cache()
         return len(deleted_ids)
 
