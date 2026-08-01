@@ -51,6 +51,77 @@ def test_every_tool_parameter_has_a_schema_description(tmp_path):
             assert schema.get("description"), f"{tool.name}.{param_name} has no schema description"
 
 
+def test_search_tool_has_accurate_annotations(tmp_path):
+    """Real MCP ToolAnnotations, not just prose - read-only, non-destructive,
+    idempotent, and closed-world are all true of search() and worth stating
+    formally so a client doesn't have to infer them from the description."""
+    server = build(tmp_path / "agents.db", namespace="coder")
+    tools = {tool.name: tool for tool in server._tool_manager.list_tools()}
+    annotations = tools["search"].annotations
+    assert annotations is not None
+    assert annotations.read_only_hint is True
+    assert annotations.destructive_hint is False
+    assert annotations.idempotent_hint is True
+    assert annotations.open_world_hint is False
+
+
+def test_search_tool_description_explains_when_to_use_it(tmp_path):
+    """Glama's MCP quality scoring flagged the old one-liner for disclosing
+    none of: read-only behavior, result ordering, k's overflow handling, or
+    how to choose between search and recall - all should show up here."""
+    server = build(tmp_path / "agents.db", namespace="coder")
+    tools = {tool.name: tool for tool in server._tool_manager.list_tools()}
+    description = tools["search"].description.lower()
+    assert "recall" in description  # usage guidance: when to use the other tool instead
+    assert "read-only" in description  # behavioral disclosure
+    assert "k" in description  # parameter behavior beyond the schema (overflow handling)
+
+
+def test_recall_tool_has_accurate_annotations(tmp_path):
+    server = build(tmp_path / "agents.db", namespace="coder")
+    tools = {tool.name: tool for tool in server._tool_manager.list_tools()}
+    annotations = tools["recall"].annotations
+    assert annotations is not None
+    assert annotations.read_only_hint is True
+    assert annotations.destructive_hint is False
+    assert annotations.idempotent_hint is True
+    assert annotations.open_world_hint is False
+
+
+def test_recall_tool_description_explains_when_to_use_it(tmp_path):
+    """Glama flagged recall's description for only implying (not stating)
+    when to use it over search, and for adding nothing beyond the schema."""
+    server = build(tmp_path / "agents.db", namespace="coder")
+    tools = {tool.name: tool for tool in server._tool_manager.list_tools()}
+    description = tools["recall"].description.lower()
+    assert "search" in description  # usage guidance: when to use the other tool instead
+    assert "read-only" in description
+    assert "k" in description
+
+
+def test_remember_tool_has_accurate_annotations(tmp_path):
+    server = build(tmp_path / "agents.db", namespace="coder")
+    tools = {tool.name: tool for tool in server._tool_manager.list_tools()}
+    annotations = tools["remember"].annotations
+    assert annotations is not None
+    assert annotations.read_only_hint is False
+    assert annotations.destructive_hint is False
+    assert annotations.idempotent_hint is False
+    assert annotations.open_world_hint is False
+
+
+def test_remember_tool_description_discloses_eviction_and_pinning(tmp_path):
+    """Glama flagged remember's description for omitting eviction behavior
+    and what pinned actually does - both disclosed only in the schema
+    before this, not in the tool-level description a model actually reads
+    for consequences."""
+    server = build(tmp_path / "agents.db", namespace="coder")
+    tools = {tool.name: tool for tool in server._tool_manager.list_tools()}
+    description = tools["remember"].description.lower()
+    assert "evict" in description  # behavioral disclosure: max_memories consequence
+    assert "pinned" in description  # parameter interaction beyond the schema
+
+
 @pytest.mark.anyio
 async def test_remember_then_recall_through_the_tool_interface(tmp_path):
     server = build(tmp_path / "agents.db", namespace="coder")
