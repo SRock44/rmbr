@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 from . import __version__
@@ -50,6 +51,28 @@ _PinnedArg = Annotated[
         "even once it's no longer among the most recent."
     ),
 ]
+
+_SEARCH_ANNOTATIONS = ToolAnnotations(
+    title="Search indexed documents",
+    read_only_hint=True,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=False,
+)
+_RECALL_ANNOTATIONS = ToolAnnotations(
+    title="Recall remembered notes",
+    read_only_hint=True,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=False,
+)
+_REMEMBER_ANNOTATIONS = ToolAnnotations(
+    title="Save a memory",
+    read_only_hint=False,
+    destructive_hint=False,
+    idempotent_hint=False,
+    open_world_hint=False,
+)
 
 # Short, runnable examples for common rmbr usage patterns, exposed as an MCP
 # resource template (rmbr://examples/{pattern}) so a connected client can
@@ -158,21 +181,47 @@ def build_mcp_server(
     idx = Index(path, namespace=namespace, policy=policy, embedder=embedder)
     mem = Memory(path, namespace, policy=policy, embedder=embedder)
 
-    @server.tool()
+    @server.tool(annotations=_SEARCH_ANNOTATIONS)
     def search(query: _QueryArg, k: _KArg = 5) -> list[dict[str, Any]]:
-        """Search this agent's indexed documents by keyword and meaning."""
+        """Search documents indexed via Index.add_files()/add_text() - the
+        agent's reference knowledge base, not its own memory. Use `recall`
+        instead for notes the agent itself chose to remember.
+
+        Read-only, no side effects. Results are ranked best-match-first by
+        a hybrid of keyword and semantic similarity, not necessarily
+        indexing order. If `k` exceeds how many documents exist, every
+        document is returned rather than raising an error.
+        """
         return [hit_to_dict(h) for h in idx.search(query, k=k)]
 
-    @server.tool()
+    @server.tool(annotations=_RECALL_ANNOTATIONS)
     def recall(query: _QueryArg, k: _KArg = 5) -> list[dict[str, Any]]:
-        """Recall this agent's own remembered notes by keyword and meaning."""
+        """Recall notes previously saved via `remember` - the agent's own
+        memory, not indexed reference documents. Use `search` instead for
+        the knowledge base.
+
+        Read-only, no side effects. Results are ranked best-match-first by
+        a hybrid of keyword and semantic similarity, not necessarily the
+        order they were remembered. If `k` exceeds how many memories
+        exist, every memory is returned rather than raising an error.
+        """
         return [hit_to_dict(h) for h in mem.recall(query, k=k)]
 
     if not read_only:
 
-        @server.tool()
+        @server.tool(annotations=_REMEMBER_ANNOTATIONS)
         def remember(text: _TextArg, pinned: _PinnedArg = False) -> int:
-            """Save a note to this agent's memory. Returns the new memory's id."""
+            """Save a new note to this agent's memory. Returns the new
+            memory's id. Always inserts - calling this twice with the same
+            text creates two separate memories, since this server doesn't
+            have deduplication enabled by default.
+
+            If the server was configured with a memory cap (max_memories),
+            the oldest unpinned memory may be evicted to make room for
+            this one. pinned=True exempts a memory from that eviction
+            permanently - there's no way to un-pin it later through this
+            tool.
+            """
             return mem.remember(text, pinned=pinned)
 
     @server.resource("rmbr://examples")
