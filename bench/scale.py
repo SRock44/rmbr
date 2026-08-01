@@ -2,10 +2,18 @@
 without it, every `remember()`/`add_text()` call re-serializes the
 *entire* vector index (usearch has no incremental on-disk save - see
 ann.py's module docstring), so a single call's cost grows with total
-index size, not just what that one call adds. This measures exactly that
-growth, with and without `.bulk()`, at several namespace sizes.
+index size, not just what that one call adds. This measures the cost of
+`n_writes` sequential writes into an already-`size`-large namespace, with
+and without `.bulk()`, at several namespace sizes.
 
     python bench/scale.py
+
+**The comparison that matters is N writes without `.bulk()` vs. the same
+N writes batched inside ONE `.bulk()` block** - not N writes each
+wrapped in their own `.bulk()` block, which would pay the same N
+reserializes as not using it at all and show no benefit (`.bulk()` only
+amortizes the reserialize cost across everything written *inside one
+block*).
 
 Seeding up to each size ALWAYS uses `.bulk()` (the realistic way to
 bulk-load) - this script doesn't pay the O(size^2) cost it exists to show
@@ -19,7 +27,6 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
-import statistics
 import sys
 import time
 from pathlib import Path
@@ -33,22 +40,20 @@ from rmbr.memory import Memory  # noqa: E402
 _DIM = 384  # matches bge-small-en-v1.5's real output dimension
 
 
-def percentile(values: list[float], p: float) -> float:
-    values = sorted(values)
-    return values[max(0, int(len(values) * p) - 1)]
-
-
-def summarize(label: str, samples: list[float]) -> dict:
+def summarize(label: str, size: int, n_writes: int, no_bulk_ms: float, bulk_ms: float) -> dict:
     result = {
-        "label": label,
-        "n": len(samples),
-        "mean_ms": statistics.mean(samples),
-        "p50_ms": percentile(samples, 0.50),
-        "p95_ms": percentile(samples, 0.95),
+        "size": size,
+        "n_writes": n_writes,
+        "no_bulk_total_ms": no_bulk_ms,
+        "no_bulk_per_write_ms": no_bulk_ms / n_writes,
+        "bulk_total_ms": bulk_ms,
+        "bulk_per_write_ms": bulk_ms / n_writes,
+        "speedup": no_bulk_ms / bulk_ms,
     }
     print(
-        f"{label:<52} mean={result['mean_ms']:>9.2f}ms  "
-        f"p50={result['p50_ms']:>9.2f}ms  p95={result['p95_ms']:>9.2f}ms  (n={result['n']})"
+        f"{label} @ {size:>6} items: {n_writes} writes, no .bulk() = {no_bulk_ms:>10.1f}ms "
+        f"({result['no_bulk_per_write_ms']:>7.2f}ms/write)  |  with .bulk() = {bulk_ms:>8.1f}ms "
+        f"({result['bulk_per_write_ms']:>6.2f}ms/write)  |  {result['speedup']:>6.1f}x faster"
     )
     return result
 
@@ -63,56 +68,48 @@ def _seed_index(idx: Index, n: int) -> None:
     idx.add_texts([f"seed document {i} about topic {i % 50}" for i in range(n)])
 
 
-def bench_memory_at_size(db_path: Path, size: int, n_samples: int) -> dict:
+def bench_memory_at_size(db_path: Path, size: int, n_writes: int) -> dict:
     mem = Memory(str(db_path), namespace="agent", embedder=FakeEmbedder(dimension=_DIM))
     _seed_memory(mem, size)
 
-    no_bulk_samples = []
-    for i in range(n_samples):
-        t0 = time.perf_counter()
+    t0 = time.perf_counter()
+    for i in range(n_writes):
         mem.remember(f"no-bulk incremental memory {i}")
-        no_bulk_samples.append((time.perf_counter() - t0) * 1000)
+    no_bulk_ms = (time.perf_counter() - t0) * 1000
 
-    bulk_samples = []
-    for i in range(n_samples):
-        t0 = time.perf_counter()
-        with mem.bulk():
+    t0 = time.perf_counter()
+    with mem.bulk():
+        for i in range(n_writes):
             mem.remember(f"bulk incremental memory {i}")
-        bulk_samples.append((time.perf_counter() - t0) * 1000)
+    bulk_ms = (time.perf_counter() - t0) * 1000
     mem.close()
 
-    no_bulk = summarize(f"Memory.remember() @ {size} items, no .bulk()", no_bulk_samples)
-    bulk = summarize(f"Memory.remember() @ {size} items, with .bulk()", bulk_samples)
-    return {"size": size, "no_bulk": no_bulk, "bulk": bulk, "speedup": no_bulk["mean_ms"] / bulk["mean_ms"]}
+    return summarize("Memory.remember()", size, n_writes, no_bulk_ms, bulk_ms)
 
 
-def bench_index_at_size(db_path: Path, size: int, n_samples: int) -> dict:
+def bench_index_at_size(db_path: Path, size: int, n_writes: int) -> dict:
     idx = Index(str(db_path), embedder=FakeEmbedder(dimension=_DIM))
     _seed_index(idx, size)
 
-    no_bulk_samples = []
-    for i in range(n_samples):
-        t0 = time.perf_counter()
+    t0 = time.perf_counter()
+    for i in range(n_writes):
         idx.add_text(f"no-bulk incremental document {i}")
-        no_bulk_samples.append((time.perf_counter() - t0) * 1000)
+    no_bulk_ms = (time.perf_counter() - t0) * 1000
 
-    bulk_samples = []
-    for i in range(n_samples):
-        t0 = time.perf_counter()
-        with idx.bulk():
+    t0 = time.perf_counter()
+    with idx.bulk():
+        for i in range(n_writes):
             idx.add_text(f"bulk incremental document {i}")
-        bulk_samples.append((time.perf_counter() - t0) * 1000)
+    bulk_ms = (time.perf_counter() - t0) * 1000
     idx.close()
 
-    no_bulk = summarize(f"Index.add_text() @ {size} chunks, no .bulk()", no_bulk_samples)
-    bulk = summarize(f"Index.add_text() @ {size} chunks, with .bulk()", bulk_samples)
-    return {"size": size, "no_bulk": no_bulk, "bulk": bulk, "speedup": no_bulk["mean_ms"] / bulk["mean_ms"]}
+    return summarize("Index.add_text()", size, n_writes, no_bulk_ms, bulk_ms)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--sizes", type=int, nargs="+", default=[1000, 5000, 10000, 20000, 40000])
-    parser.add_argument("--n-samples", type=int, default=10)
+    parser.add_argument("--n-writes", type=int, default=50, help="sequential writes measured per size")
     parser.add_argument("--out", type=Path, default=Path(__file__).parent / "results")
     args = parser.parse_args()
 
@@ -121,17 +118,17 @@ def main() -> None:
     shutil.rmtree(workdir, ignore_errors=True)
     workdir.mkdir(parents=True)
 
-    print("Memory.bulk() impact, growing namespace sizes:\n")
-    memory_results = [bench_memory_at_size(workdir / f"memory_{size}.db", size, args.n_samples) for size in args.sizes]
+    print(f"Memory.bulk() impact: cost of {args.n_writes} sequential writes, growing namespace sizes:\n")
+    memory_results = [bench_memory_at_size(workdir / f"memory_{size}.db", size, args.n_writes) for size in args.sizes]
 
-    print("\nIndex.bulk() impact, growing namespace sizes:\n")
-    index_results = [bench_index_at_size(workdir / f"index_{size}.db", size, args.n_samples) for size in args.sizes]
+    print(f"\nIndex.bulk() impact: cost of {args.n_writes} sequential writes, growing namespace sizes:\n")
+    index_results = [bench_index_at_size(workdir / f"index_{size}.db", size, args.n_writes) for size in args.sizes]
 
     out_path = args.out / f"scale_{int(time.time())}.json"
     out_path.write_text(
         json.dumps(
             {
-                "config": {"sizes": args.sizes, "n_samples": args.n_samples, "dim": _DIM},
+                "config": {"sizes": args.sizes, "n_writes": args.n_writes, "dim": _DIM},
                 "memory": memory_results,
                 "index": index_results,
             },

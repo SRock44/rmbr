@@ -127,6 +127,24 @@ mem.forget_older_than(60 * 60 * 24 * 30)     # delete anything older than 30 day
 mem.remember("the customer's account was permanently deactivated", pinned=True)
 ```
 
+Loading many items into an already-large namespace (an org's internal doc set, a backfill of historical memories) is a different situation than a single `remember()` mid-conversation — batch it:
+
+```python
+# Without this, every single remember()/add_text() call re-serializes the
+# *entire* vector index (usearch has no incremental on-disk save) - fine
+# at hundreds-to-low-thousands per namespace, real cost once a namespace
+# has tens of thousands of items and you're adding many more sequentially.
+with mem.bulk():
+    for fact in many_facts:
+        mem.remember(fact)
+# SQL rows are still durable immediately inside the block; only the vector
+# index's persistence is deferred to one write when the block exits - a
+# crash mid-block loses whatever hadn't been flushed yet, a real tradeoff
+# you're opting into, not a silent one. See Performance below for numbers.
+```
+
+`Index` has the same `.bulk()`.
+
 Check on a namespace's memory without hand-writing SQL:
 
 ```python
@@ -300,7 +318,7 @@ git clone https://github.com/SRock44/rmbr.git
 cd rmbr
 python -m venv .venv && source .venv/bin/activate   # .venv\Scripts\activate on Windows
 pip install --only-binary :all: -e .
-pytest tests/    # 267 tests, no network or API key required
+pytest tests/    # 284 tests, no network or API key required
 ```
 
 The default embedder (`fastembed`, a local ONNX model) downloads its model weights on first use. Every test in `tests/` instead uses `rmbr.embed.FakeEmbedder` — a deterministic, dependency-free embedder — so the suite runs fully offline; you can inject the same `FakeEmbedder` into your own tests via `Memory(..., embedder=FakeEmbedder())` / `Index(..., embedder=FakeEmbedder())`.
@@ -501,6 +519,35 @@ The last two rows are what v0.2's `rerank=True` and `recency_weight` actually co
 **Bulk-ingest throughput, for full transparency (not a claim we're leading with):** rmbr batches every write in `add_texts()`/`add_files()` into one SQLite transaction, one embedder call, and one ANN-index insert for the whole batch, rather than once per document — a real, measured ~2,966 docs/s (hybrid, default; median of 3 seeds) on a 5,000-doc synthetic corpus. Note what didn't move much: batching the embed call barely helped *in this specific benchmark*, because it feeds every engine identical precomputed vectors (a near-free dict lookup) specifically to isolate storage/ANN performance — a real embedder (ONNX inference, or an API call) has real fixed per-call overhead that batching actually amortizes, so `bench/latency.py`'s numbers above are the more representative ones for real-world embedding cost.
 
 Against the two purpose-built vector databases, rmbr is still slower at pure bulk loading — a fundamentally different job than what rmbr is built for: Chroma ingests ~2.6x faster (~7,775 docs/s median) and LanceDB ~35-80x faster (~104,000-236,000 docs/s, wide variance across runs), because it's one Arrow batch write with zero per-row relational bookkeeping. Against mem0 — the closer peer, since it's an actual memory abstraction, not a raw vector store — the result flips: rmbr ingests **~7.4x faster** (~2,966 vs ~401 docs/s median), reflecting mem0's real per-row cost (a SQLite history/audit-log write plus a BM25 sparse-vector encode alongside the dense one, on every insert, left on for this benchmark since that's mem0's real default — see [Coming from mem0](#coming-from-mem0) above for why rmbr does neither by default). What rmbr does hold its own on across all three: recall@5 (0.949) is close behind mem0's hybrid search (0.998) and LanceDB's exact search (1.000), and clearly ahead of Chroma's vector-only search (0.797). Full numbers, all 3 seeds (now including mem0), in [`bench/pinned/`](bench/pinned/) and reproducible via `pip install -e ".[bench]" && python bench/run.py`. We're disclosing this, not hiding it: if bulk document loading at scale is your actual workload, see [Alternatives](#alternatives) above — that's not what rmbr optimizes for.
+
+### Scale: what happens once a namespace holds tens of thousands of items
+
+`usearch` (the vector index) has no incremental on-disk save — every `remember()`/`add_text()` call re-serializes and rewrites the *entire* vector index, every time. At rmbr's normal scale (hundreds to low-thousands per namespace) that's negligible. Once a namespace grows into the tens of thousands, many sequential writes each pay to reserialize everything that came before — real, measured, and now fixed with `Memory.bulk()`/`Index.bulk()` (see [Keeping memory accurate over time](#keeping-memory-accurate-over-time) above for usage). Cost of 50 sequential `remember()` calls into an already-populated namespace, with vs. without `.bulk()`:
+
+| namespace size | no `.bulk()` (total / per-write) | with `.bulk()` (total / per-write) | speedup |
+|---:|---:|---:|---:|
+| 1,000 | 196ms / 3.93ms | 40ms / 0.81ms | 4.9x |
+| 5,000 | 1,392ms / 27.83ms | 87ms / 1.74ms | 16.0x |
+| 10,000 | 2,802ms / 56.04ms | 123ms / 2.46ms | 22.8x |
+| 20,000 | 5,555ms / 111.10ms | 195ms / 3.89ms | 28.6x |
+| 40,000 | 12,135ms / 242.70ms | 341ms / 6.82ms | **35.6x** |
+
+Without `.bulk()`, per-write cost climbs linearly with namespace size — the signature of the O(n) reserialize happening on every call. With it, per-write cost barely grows (0.81ms → 6.82ms across a 40x size increase) because the expensive reserialize happens once per batch, not once per write — and the speedup keeps *growing* with scale, not just holding steady. `Index.add_text()` shows the same shape (up to 33.5x at 40,000). `.bulk()` is opt-in and changes nothing by default — every call remains immediately durable unless you explicitly defer. Reproduce: `python bench/scale.py --sizes 1000 5000 10000 20000 40000 --n-writes 50`; raw output in [`bench/pinned/`](bench/pinned/).
+
+### Real protocol round-trip: MCP and HTTP, not just the Python API
+
+The numbers above measure the in-process Python API. What a caller actually experiences going through MCP or HTTP includes real subprocess/socket overhead on top — measured with a real `python -m rmbr` subprocess talked to over real stdio by the real `mcp` client SDK, and a real uvicorn server on a real OS socket hit with a real `httpx` client (not the in-process shortcuts the test suite uses for speed), real default embedder, 500-item corpus, 50 samples per call:
+
+| | mean | p50 | p95 | p99 |
+|---|---:|---:|---:|---:|
+| MCP `remember` tool call | 4.58ms | 4.38ms | 5.72ms | 5.82ms |
+| MCP `recall` tool call | 3.51ms | 3.48ms | 3.69ms | 3.78ms |
+| MCP `search` tool call | 0.52ms | 0.50ms | 0.54ms | 0.61ms |
+| HTTP `POST /memories` | 4.29ms | 3.91ms | 5.42ms | 5.76ms |
+| HTTP `POST /memories/search` | 3.02ms | 2.99ms | 3.29ms | 3.53ms |
+| HTTP `GET /memories/{id}` | 0.27ms | 0.26ms | 0.30ms | 0.36ms |
+
+Protocol overhead on top of the raw Python API numbers above is small — low single-digit milliseconds, not the dominant cost. `session.initialize()` (spawning the MCP subprocess and completing the handshake) is the one genuinely slow one-time cost, at ~741ms — pay it once per session, not per call. Reproduce: `python bench/mcp_latency.py` / `python bench/http_latency.py`; raw output in [`bench/pinned/`](bench/pinned/).
 
 ### Why `bge-small-en-v1.5` is still the default
 
