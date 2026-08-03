@@ -12,13 +12,13 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from .ann import AnnIndex
-from .embed import CachingEmbedder, Embedder, FastEmbedEmbedder
+from .embed import CachingEmbedder, Embedder, get_shared_fastembed_embedder
 from .policy import Policy
 from .store import Store
 
 
 def make_embedder(embedder: Embedder | None, store: Store) -> CachingEmbedder:
-    return CachingEmbedder(embedder or FastEmbedEmbedder(), store)
+    return CachingEmbedder(embedder or get_shared_fastembed_embedder(), store)
 
 
 def load_ann_index(store: Store, collection: str) -> AnnIndex | None:
