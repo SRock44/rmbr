@@ -7,6 +7,16 @@ from rmbr.embed import CachingEmbedder, FakeEmbedder
 from rmbr.store import Store
 
 
+@pytest.fixture(autouse=True)
+def _clear_shared_fastembed_cache():
+    """Every test using get_shared_fastembed_embedder starts from a clean cache."""
+    import rmbr.embed as embed_module
+
+    embed_module._shared_fastembed_embedders.clear()
+    yield
+    embed_module._shared_fastembed_embedders.clear()
+
+
 class CountingEmbedder:
     """Wraps FakeEmbedder and records every text it was actually asked to embed."""
 
@@ -92,6 +102,109 @@ def test_caching_embedder_embed_one(store):
     cache = CachingEmbedder(CountingEmbedder(), store)
     vec = cache.embed_one("solo text")
     assert vec.shape == (16,)
+
+
+def test_get_shared_fastembed_embedder_reuses_instance_for_same_model(monkeypatch):
+    """The whole point of the fix: same model_name -> same FastEmbedEmbedder,
+    so only one onnxruntime InferenceSession ever gets constructed for it."""
+    pytest.importorskip("fastembed")
+    from rmbr.embed import get_shared_fastembed_embedder
+
+    construction_count = {"n": 0}
+
+    class FakeTextEmbedding:
+        def __init__(self, model_name):
+            construction_count["n"] += 1
+
+    monkeypatch.setattr("fastembed.TextEmbedding", FakeTextEmbedding)
+
+    e1 = get_shared_fastembed_embedder("some/model")
+    e2 = get_shared_fastembed_embedder("some/model")
+    e3 = get_shared_fastembed_embedder("some/model")
+
+    assert e1 is e2 is e3
+    assert construction_count["n"] == 1
+
+
+def test_get_shared_fastembed_embedder_separates_by_model_name(monkeypatch):
+    pytest.importorskip("fastembed")
+    from rmbr.embed import get_shared_fastembed_embedder
+
+    construction_count = {"n": 0}
+
+    class FakeTextEmbedding:
+        def __init__(self, model_name):
+            construction_count["n"] += 1
+
+    monkeypatch.setattr("fastembed.TextEmbedding", FakeTextEmbedding)
+
+    a = get_shared_fastembed_embedder("model-a")
+    b = get_shared_fastembed_embedder("model-b")
+
+    assert a is not b
+    assert construction_count["n"] == 2
+
+
+def test_get_shared_fastembed_embedder_is_thread_safe(monkeypatch):
+    """Many threads racing to build the same default embedder must still
+    only construct one underlying session, and never crash/raise."""
+    pytest.importorskip("fastembed")
+    import threading
+
+    from rmbr.embed import get_shared_fastembed_embedder
+
+    construction_count = {"n": 0}
+    construction_lock = threading.Lock()
+
+    class FakeTextEmbedding:
+        def __init__(self, model_name):
+            with construction_lock:
+                construction_count["n"] += 1
+
+    monkeypatch.setattr("fastembed.TextEmbedding", FakeTextEmbedding)
+
+    results: list = []
+    errors: list = []
+
+    def worker():
+        try:
+            results.append(get_shared_fastembed_embedder("racing-model"))
+        except Exception as exc:  # pragma: no cover - failure path
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(32)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors
+    assert len(results) == 32
+    assert all(r is results[0] for r in results)
+    assert construction_count["n"] == 1
+
+
+def test_make_embedder_default_path_shares_fastembed_session_across_instances(monkeypatch, store):
+    """Reproduces the crash scenario from the bug report at the make_embedder
+    level: multiple Memory/Index-style constructions (one CachingEmbedder per
+    "namespace") against the default embedder=None path must not each build
+    their own FastEmbedEmbedder/TextEmbedding session."""
+    pytest.importorskip("fastembed")
+    from rmbr._engine import make_embedder
+
+    construction_count = {"n": 0}
+
+    class FakeTextEmbedding:
+        def __init__(self, model_name):
+            construction_count["n"] += 1
+
+    monkeypatch.setattr("fastembed.TextEmbedding", FakeTextEmbedding)
+
+    embedders = [make_embedder(None, store) for _ in range(6)]  # e.g. 6 namespaces
+
+    assert construction_count["n"] == 1
+    underlying = [ce.embedder for ce in embedders]
+    assert all(u is underlying[0] for u in underlying)
 
 
 def test_openai_embedder_batches_and_sorts_by_index(monkeypatch):

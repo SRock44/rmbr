@@ -21,6 +21,7 @@ both ours and yours. Use it in your own test suite to exercise `Memory`/
 from __future__ import annotations
 
 import hashlib
+import threading
 from typing import Protocol, runtime_checkable
 
 import numpy as np
@@ -63,6 +64,36 @@ class FastEmbedEmbedder:
         if not texts:
             return []
         return [np.asarray(v, dtype=np.float32) for v in self._model.embed(texts)]
+
+
+_shared_fastembed_embedders: dict[str, FastEmbedEmbedder] = {}
+_shared_fastembed_lock = threading.Lock()
+
+
+def get_shared_fastembed_embedder(model_name: str = DEFAULT_MODEL) -> FastEmbedEmbedder:
+    """Return a process-wide `FastEmbedEmbedder` for `model_name`, constructing it once.
+
+    Every `FastEmbedEmbedder()` loads a real onnxruntime `InferenceSession`.
+    Apps that open one `Memory`/`Index` per namespace against the same
+    `.db` file (rmbr's own `Policy.allow(read=[...])` exists to support
+    that pattern) would otherwise construct one redundant session per
+    instance, which has been observed to crash the process (native heap
+    corruption, not a catchable Python exception) once a handful pile up
+    - independent of any concurrency, and worse when another native
+    library shares the process. Memoizing by model name is what makes
+    `Memory(embedder=None)` / `Index(embedder=None)` share one session by
+    default instead of requiring every caller to know to pass a shared
+    embedder in explicitly.
+    """
+    embedder = _shared_fastembed_embedders.get(model_name)
+    if embedder is not None:
+        return embedder
+    with _shared_fastembed_lock:
+        embedder = _shared_fastembed_embedders.get(model_name)
+        if embedder is None:
+            embedder = FastEmbedEmbedder(model_name)
+            _shared_fastembed_embedders[model_name] = embedder
+        return embedder
 
 
 class OpenAIEmbedder:
