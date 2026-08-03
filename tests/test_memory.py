@@ -57,6 +57,30 @@ def test_bulk_recall_sees_writes_made_inside_the_block(tmp_path):
         assert len(hits) == 1
 
 
+def test_second_namespace_remember_after_reopen_survives_prior_forget(tmp_path):
+    """Regression test for #20: constructing a second Memory (different
+    namespace, same db file, sharing one embedder - the exact pattern
+    Policy.allow(read=[...]) exists to support) after a first namespace's
+    remember()+forget() cycle used to segfault the process on the second
+    namespace's first remember() - see test_ann.py's lower-level
+    regression tests for why (usearch leaves a tombstoned node behind that
+    corrupts on the next save/load/add cycle).
+    """
+    db = tmp_path / "agents.db"
+    shared_embedder = FakeEmbedder(dimension=16)
+    policy = Policy()
+
+    mem_a = Memory(str(db), "ns_a", policy=policy, embedder=shared_embedder)
+    mid = mem_a.remember("hello from namespace a")
+    mem_a.forget(mid)
+
+    mem_b = Memory(str(db), "ns_b", policy=policy, embedder=shared_embedder)
+    mem_b.remember("hello from namespace b")  # segfaulted the process pre-fix
+
+    assert len(mem_b.list()) == 1
+    assert mem_b.recall("hello from namespace b")[0].text == "hello from namespace b"
+
+
 def test_bulk_writes_are_durable_across_reopen(tmp_path):
     db = tmp_path / "agents.db"
     mem = make_memory(db, "coder")
