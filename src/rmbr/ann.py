@@ -49,6 +49,8 @@ class AnnIndex:
     ):
         self.dim = dim
         self.metric = metric
+        self._expansion_add = expansion_add
+        self._expansion_search = expansion_search
         self._index = _UsearchIndex(
             ndim=dim,
             metric=metric,
@@ -56,6 +58,7 @@ class AnnIndex:
             expansion_add=expansion_add,
             expansion_search=expansion_search,
         )
+        self._has_removals = False
 
     def __len__(self) -> int:
         return len(self._index)
@@ -89,6 +92,7 @@ class AnnIndex:
         if not ids:
             return
         self._index.remove(np.asarray(ids, dtype=np.int64))
+        self._has_removals = True
 
     def search(self, query: np.ndarray, k: int) -> list[tuple[int, float]]:
         """Return up to k (id, similarity) pairs, best match first.
@@ -102,7 +106,41 @@ class AnnIndex:
         return [(int(key), 1.0 - float(dist)) for key, dist in zip(matches.keys, matches.distances)]
 
     def to_bytes(self) -> bytes:
+        self._compact_if_needed()
         return bytes(self._index.save())
+
+    def _compact_if_needed(self) -> None:
+        """Rebuild `self._index` from its surviving vectors if anything was
+        ever `remove()`-d from it, right before serialization.
+
+        usearch (>=2.9, confirmed through 2.26.0) leaves tombstoned nodes
+        in the HNSW graph after `remove()` — fine for a live index, but a
+        `save()` → `load()` round trip of an index that has ever had a
+        `remove()` (even down to zero vectors) produces one that segfaults
+        on its very next `add()` in the new process. Every `Memory`/`Index`
+        write path calls `to_bytes()` after `remember()`/`forget()`, and
+        `from_bytes()` runs on every subsequent open of that `.db` file, so
+        without this, opening a second handle onto a namespace that ever
+        had anything removed would native-crash on its first write. See
+        https://github.com/SRock44/rmbr/issues/20.
+        """
+        if not self._has_removals:
+            return
+        ids = self.ids()
+        fresh = _UsearchIndex(
+            ndim=self.dim,
+            metric=self.metric,
+            dtype="f32",
+            expansion_add=self._expansion_add,
+            expansion_search=self._expansion_search,
+        )
+        if ids:
+            keys = np.asarray(ids, dtype=np.int64)
+            got = self._index.get(keys)
+            vectors = np.stack(got) if isinstance(got, tuple) else np.asarray(got).reshape(len(ids), self.dim)
+            fresh.add(keys, vectors)
+        self._index = fresh
+        self._has_removals = False
 
     @classmethod
     def from_bytes(cls, blob: bytes, dim: int, metric: str = DEFAULT_METRIC) -> AnnIndex:

@@ -70,6 +70,52 @@ def test_serialize_roundtrip_preserves_search_results():
     assert results[0][0] == 1
 
 
+def test_reload_after_full_removal_then_add_does_not_crash():
+    """Regression test for #20: usearch (>=2.9, confirmed through 2.26.0)
+    leaves a tombstoned node in the HNSW graph after remove(), even once the
+    index is back down to zero vectors. Serializing that state, reloading it
+    in a fresh AnnIndex, and adding a new vector segfaulted the whole
+    process (native access violation, not a catchable Python exception)
+    before AnnIndex started compacting on serialize - so this test's real
+    assertion is that the process survives to reach the asserts at all.
+    """
+    idx = AnnIndex(dim=4)
+    idx.add([1], [unit([1, 0, 0, 0])])
+    idx.remove([1])
+    blob = idx.to_bytes()
+
+    restored = AnnIndex.from_bytes(blob, dim=4)
+    restored.add([2], [unit([0, 1, 0, 0])])  # segfaulted the process pre-fix
+    assert len(restored) == 1
+    results = restored.search(unit([0, 1, 0, 0]), k=1)
+    assert results[0][0] == 2
+
+
+def test_reload_after_partial_removal_then_add_preserves_surviving_vectors():
+    idx = AnnIndex(dim=4)
+    idx.add([1, 2, 3], [unit([1, 0, 0, 0]), unit([0, 1, 0, 0]), unit([0, 0, 1, 0])])
+    idx.remove([2])
+    blob = idx.to_bytes()
+
+    restored = AnnIndex.from_bytes(blob, dim=4)
+    restored.add([4], [unit([0, 0, 0, 1])])
+    assert len(restored) == 3
+    assert sorted(restored.ids()) == [1, 3, 4]
+    results = restored.search(unit([1, 0, 0, 0]), k=1)
+    assert results[0][0] == 1
+
+
+def test_compact_is_skipped_when_nothing_was_removed():
+    """The rebuild-on-serialize guard should be a no-op (same underlying
+    _index object) when remove() was never called, so the common
+    append-only case doesn't pay a full rebuild on every save."""
+    idx = AnnIndex(dim=4)
+    idx.add([1, 2], [unit([1, 0, 0, 0]), unit([0, 1, 0, 0])])
+    original_index_obj = idx._index
+    idx.to_bytes()
+    assert idx._index is original_index_obj
+
+
 def test_recall_at_scale_meets_floor():
     """Regression guard for a real bug: usearch's own defaults
     (expansion_search=64) measured recall@5=0.68 on a 5,000-vector
